@@ -20,6 +20,12 @@ type SearchItem = {
   raw?: any;
 };
 
+type EpisodeGroupItem = {
+  id: string;
+  name: string;
+  description?: string;
+};
+
 const el = (html: string) => {
   const t = document.createElement("template");
   t.innerHTML = html.trim();
@@ -35,6 +41,7 @@ export function renderApp(root: HTMLElement) {
     lang: "zh-CN",
     tmdbEpisodeGroupId: "",
     selected: null as SearchItem | null,
+    groups: [] as EpisodeGroupItem[],
     manual: {
       title: "",
       originalTitle: "",
@@ -85,6 +92,12 @@ export function renderApp(root: HTMLElement) {
             <div class="row">
               <md-filled-text-field id="episodeGroup" label="TMDB 剧集组ID（可选，仅 TV）" style="flex:1;"></md-filled-text-field>
               <md-outlined-button id="btnGroups">查剧集组</md-outlined-button>
+            </div>
+
+            <!-- ✅ 新增：剧集组结果列表 -->
+            <div>
+              <div class="muted" style="margin:6px 0 8px 2px;">剧集组列表（点击“使用这个剧集组”自动填入 groupId）</div>
+              <div class="results" id="groupResults"></div>
             </div>
 
             <div class="row">
@@ -156,6 +169,45 @@ export function renderApp(root: HTMLElement) {
     $("progressText").textContent = total > 0 ? `${step}（${current}/${total}）` : step;
   };
 
+  const clearGroupResults = (msg?: string) => {
+    const box = $("groupResults");
+    box.innerHTML = "";
+    if (msg) box.appendChild(el(`<div class="muted">${escapeHtml(msg)}</div>`));
+  };
+
+  const renderGroups = (groups: EpisodeGroupItem[]) => {
+    const box = $("groupResults");
+    box.innerHTML = "";
+
+    if (!groups?.length) {
+      box.appendChild(el(`<div class="muted">该剧没有可用剧集组</div>`));
+      return;
+    }
+
+    for (const g of groups) {
+      const node = el(`
+        <div class="result-item">
+          <div class="row" style="justify-content:space-between;">
+            <div style="font-weight:700;">${escapeHtml(g.name)}</div>
+            <div class="muted">groupId=${escapeHtml(g.id)}</div>
+          </div>
+          ${g.description ? `<div class="muted">${escapeHtml(g.description)}</div>` : ""}
+          <div class="row">
+            <md-outlined-button>使用这个剧集组</md-outlined-button>
+          </div>
+        </div>
+      `);
+
+      node.querySelector("md-outlined-button")!.addEventListener("click", () => {
+        ($("episodeGroup") as any).value = g.id;
+        state.tmdbEpisodeGroupId = g.id;
+        log(`已选定剧集组：${g.name}（${g.id}）`);
+      });
+
+      box.appendChild(node);
+    }
+  };
+
   const renderResults = (items: SearchItem[]) => {
     const box = $("results");
     box.innerHTML = "";
@@ -177,12 +229,18 @@ export function renderApp(root: HTMLElement) {
           </div>
         </div>
       `);
+
       node.querySelector("md-outlined-button")!.addEventListener("click", () => {
         state.selected = it;
         log(`已选择：${it.title}（${it.source} #${it.id}）`);
+
+        // 选中条目后，清空旧的剧集组展示，避免误用
+        clearGroupResults("已选择新条目，可点击“查剧集组”获取该剧的剧集组。");
+
         // 自动把手工标题带一下，便于覆盖
-        if (!state.manual.title) $("mTitle").setAttribute("value", it.title);
+        if (!state.manual.title) ($("mTitle") as any).value = it.title;
       });
+
       box.appendChild(node);
     }
   };
@@ -218,6 +276,11 @@ export function renderApp(root: HTMLElement) {
     state.running = true;
     setProgress("检索中…");
     log(`开始检索：source=${state.source}, query=${state.query || "-"}, id=${state.id || "-"}`);
+
+    // 搜索会让“当前条目/剧集组”失效，清空一下更不容易误操作
+    state.selected = null;
+    clearGroupResults("请先从检索结果中选择一个 TMDB TV 条目，然后再查剧集组。");
+
     try {
       const url = new URL("/api/search", location.origin);
       url.searchParams.set("source", state.source);
@@ -242,38 +305,53 @@ export function renderApp(root: HTMLElement) {
 
   $("btnGroups").addEventListener("click", async () => {
     getInputs();
+
+    // 只对 TMDB + TV 有意义
     if (state.source !== "tmdb") {
       log("只有 TMDB 支持剧集组检索");
       return;
     }
-    const tvId = state.id || state.selected?.id;
-    if (!tvId) {
-      log("请先输入 TMDB TV ID 或先检索并选择一个 TV 条目");
+    if (state.mediaType === "movie") {
+      log("电影没有 TMDB Episode Groups（请切换为 TV）");
       return;
     }
+
+    // ✅ 关键：tvId 应来自“选中的 TV 条目”优先，其次手动 id
+    const tvId = state.selected?.id || state.id;
+    if (!tvId) {
+      log("请先检索并选择一个 TMDB TV 条目（或在“直接输入ID”里填 TV ID）");
+      clearGroupResults("缺少 TMDB TV ID：请先选择一个 TV 条目。");
+      return;
+    }
+
     state.running = true;
     setProgress("获取剧集组…");
+    clearGroupResults("获取中…");
+    log(`获取剧集组：tvId=${tvId}`);
+
     try {
       const url = new URL("/api/tmdb-episode-groups", location.origin);
       url.searchParams.set("tvId", tvId);
+
       const res = await fetch(url.toString());
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "获取失败");
 
-      const groups = data.groups || [];
+      const groups: EpisodeGroupItem[] = data.groups || [];
+      state.groups = groups;
+
       if (!groups.length) {
         log("未找到剧集组（或该剧没有剧集组）");
+        clearGroupResults("未找到剧集组（或该剧没有剧集组）");
       } else {
-        log(`剧集组列表（取前 20）：`);
-        for (const g of groups.slice(0, 20)) {
-          log(`- ${g.name} | id=${g.id} | ${g.description || ""}`);
-        }
-        log("把想要的 groupId 粘贴到“TMDB 剧集组ID”输入框即可按该组生成。");
+        log(`找到剧集组：${groups.length} 个（页面已展示，可一键使用）`);
+        renderGroups(groups);
       }
       setProgress("剧集组获取完成");
     } catch (e: any) {
       log(`剧集组获取失败：${e?.message || e}`);
       setProgress("剧集组获取失败");
+      clearGroupResults(`剧集组获取失败：${e?.message || e}`);
     } finally {
       state.running = false;
     }
@@ -331,6 +409,9 @@ export function renderApp(root: HTMLElement) {
       state.running = false;
     }
   });
+
+  // 初始提示
+  clearGroupResults("提示：先用 TMDB 搜索并选择 TV 条目，再点击“查剧集组”。");
 }
 
 function escapeHtml(s: string) {
