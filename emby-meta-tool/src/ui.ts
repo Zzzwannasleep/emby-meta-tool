@@ -7,6 +7,7 @@
  * - 一键生成并打包下载（SSE 进度）
  * - 重命名（MoviePilot 模板）+ NFO 命名模式（standard / same_as_media / both）
  * - 预览界面：展示媒体重命名路径 + NFO 输出文件名预览
+ * - ✅ 新增：🪄 自动补全 originals（给一集，解析完剩下的）
  *
  * 依赖后端接口：
  * - POST /api/search
@@ -169,6 +170,9 @@ function setBusy(v: boolean, status?: string) {
   const btnPrev = $("btnPreview") as HTMLButtonElement;
   (btnPrev as any).disabled = v;
 
+  const btnAuto = document.getElementById("btnAutoFillOriginals") as HTMLButtonElement | null;
+  if (btnAuto) (btnAuto as any).disabled = v;
+
   const btnSearch = $("btnSearch") as HTMLButtonElement;
   (btnSearch as any).disabled = v;
 
@@ -237,6 +241,97 @@ function getSeriesForRequest() {
   const year = state.manual.year || state.selected?.year || "";
   const originalTitle = state.manual.originalTitle || state.selected?.originalTitle || "";
   return { title, year, originalTitle };
+}
+
+/* =========================
+   ✅ 自动补全 originals：给一集，解析剩下的
+========================= */
+
+function splitExt(name: string): { base: string; ext: string } {
+  const idx = name.lastIndexOf(".");
+  if (idx <= 0) return { base: name, ext: "" };
+  return { base: name.slice(0, idx), ext: name.slice(idx) };
+}
+
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function detectSeEp(s: string): { season: number | null; episode: number | null } {
+  const lower = (s || "").toLowerCase();
+
+  // 1) SxxEyy / s1e2 / S01.E02
+  let m = lower.match(/s\s*0*(\d{1,3})\s*[ ._\-\[\(]*e\s*0*(\d{1,4})/i);
+  if (m) return { season: parseInt(m[1], 10), episode: parseInt(m[2], 10) };
+
+  // 2) 1x02
+  m = lower.match(/(?:^|[ ._\-\[\(])0*(\d{1,3})\s*x\s*0*(\d{1,4})(?:$|[ ._\-\]\)])/i);
+  if (m) return { season: parseInt(m[1], 10), episode: parseInt(m[2], 10) };
+
+  // 3) 第1季第2集/话
+  m = lower.match(/第\s*0*(\d{1,3})\s*季[\s\S]{0,8}?第\s*0*(\d{1,4})\s*(?:集|话)/i);
+  if (m) return { season: parseInt(m[1], 10), episode: parseInt(m[2], 10) };
+
+  // 4) 第2集/话（无季）
+  m = lower.match(/第\s*0*(\d{1,4})\s*(?:集|话)/i);
+  if (m) return { season: null, episode: parseInt(m[1], 10) };
+
+  // 5) EP02/E02/Episode 02（无季）
+  m = lower.match(/(?:^|[ ._\-\[\(])(?:ep|e|episode)\s*0*(\d{1,4})(?:$|[ ._\-\]\)])/i);
+  if (m) return { season: null, episode: parseInt(m[1], 10) };
+
+  return { season: null, episode: null };
+}
+
+function replaceSeEpInName(originalBase: string, season: number | null, episode: number) {
+  const s = originalBase;
+
+  // 优先替换已存在的模式，尽量保持原本风格
+  if (/s\s*0*\d+\s*[ ._\-\[\(]*e\s*0*\d+/i.test(s)) {
+    return s.replace(/s\s*0*\d+\s*[ ._\-\[\(]*e\s*0*\d+/i, `S${pad2(season ?? 1)}E${pad2(episode)}`);
+  }
+
+  if (/\b0*\d+\s*x\s*0*\d+\b/i.test(s)) {
+    return s.replace(/\b0*\d+\s*x\s*0*\d+\b/i, `${season ?? 1}x${pad2(episode)}`);
+  }
+
+  if (/第\s*0*\d+\s*(集|话)/i.test(s)) {
+    // 统一成 “第 X 集”
+    return s.replace(/第\s*0*\d+\s*(集|话)/i, `第 ${episode} 集`);
+  }
+
+  if (/\b(?:ep|e|episode)\s*0*\d+\b/i.test(s)) {
+    return s.replace(/\b(?:ep|e|episode)\s*0*\d+\b/i, `E${pad2(episode)}`);
+  }
+
+  // 都没命中：追加
+  return `${s} - S${pad2(season ?? 1)}E${pad2(episode)}`;
+}
+
+function autoFillOriginalsFromFirstLine(): string {
+  const lines = getOriginalsList();
+  if (!lines.length) throw new Error("请先在“原始文件名列表”里填一行样例。");
+
+  const sample = lines[0];
+  const { base, ext } = splitExt(sample);
+
+  const se = detectSeEp(base);
+  const season = se.season ?? 1;
+  const startEp = se.episode ?? 1;
+
+  // 生成多少集：优先使用你手动结构（seasonEpisodeMapText），否则 epsPerSeason
+  const seasonMap = parseSeasonMap(state.manualStructure.seasonEpisodeMapText || "");
+  const per = Math.max(1, Number(state.manualStructure.episodesPerSeason || 1));
+  const count = seasonMap[String(season)] || per;
+
+  if (!Number.isFinite(count) || count <= 0) throw new Error("季/集结构不正确：请先填写每季集数或映射。");
+
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const ep = startEp + i;
+    out.push(replaceSeEpInName(base, season, ep) + ext);
+  }
+  return out.join("\n");
 }
 
 /** ---------------------------
@@ -443,7 +538,9 @@ async function startGenerateAndDownload() {
       const data = dataLine ? JSON.parse(dataLine) : {};
 
       if (ev === "progress") {
-        const msg = data?.message ? `${data.step || "处理中"}：${data.message}` : `${data.step || "处理中"}…`;
+        const msg = data?.message
+          ? `${data.step || "处理中"}：${data.message}`
+          : `${data.step || "处理中"}…`;
         setProgressText(msg);
       } else if (ev === "done") {
         const url = data?.downloadUrl;
@@ -635,9 +732,15 @@ function bind() {
 
   // structure
   $("s_seasons").addEventListener("input", (e) => (state.manualStructure.seasons = Number((e.target as HTMLInputElement).value || 1)));
-  $("s_epsPer").addEventListener("input", (e) => (state.manualStructure.episodesPerSeason = Number((e.target as HTMLInputElement).value || 1)));
+  $("s_epsPer").addEventListener(
+    "input",
+    (e) => (state.manualStructure.episodesPerSeason = Number((e.target as HTMLInputElement).value || 1))
+  );
   $("s_map").addEventListener("input", (e) => (state.manualStructure.seasonEpisodeMapText = (e.target as HTMLInputElement).value));
-  $("s_epTitleTpl").addEventListener("input", (e) => (state.manualStructure.episodeTitleTemplate = (e.target as HTMLInputElement).value));
+  $("s_epTitleTpl").addEventListener(
+    "input",
+    (e) => (state.manualStructure.episodeTitleTemplate = (e.target as HTMLInputElement).value)
+  );
 
   // rename
   $("tvFormat").addEventListener("input", (e) => (state.rename.tvFormat = (e.target as HTMLTextAreaElement).value));
@@ -700,6 +803,31 @@ function bind() {
     }
   });
 
+  // ✅ 自动补全 originals（按首行）
+  $("btnAutoFillOriginals").addEventListener("click", async () => {
+    try {
+      // 先同步 textarea -> state（避免用户刚粘贴但 state 还没更新）
+      state.rename.originalsText = ($("originals") as HTMLTextAreaElement).value;
+
+      const filled = autoFillOriginalsFromFirstLine();
+      state.rename.originalsText = filled;
+      ($("originals") as HTMLTextAreaElement).value = filled;
+
+      log("已根据首行样例自动补全 originals 列表。");
+
+      // 自动预览（更丝滑）
+      setBusy(true, "生成预览…");
+      log("开始生成预览（前50行）…");
+      const data = await apiPreview();
+      renderPreview(data.rows || []);
+      setBusy(false, "预览完成 ✅");
+      log("预览完成 ✅");
+    } catch (e: any) {
+      setBusy(false, "自动补全失败");
+      log(`自动补全失败：${e?.message || String(e)}`);
+    }
+  });
+
   // 预览
   $("btnPreview").addEventListener("click", async () => {
     try {
@@ -749,7 +877,6 @@ function injectSkeleton() {
   const root = document.getElementById("app");
   if (!root) throw new Error("Missing #app");
 
-  // ✅ 这里：在 .page 外追加 footer（确保在页面底部）
   root.innerHTML = `
   <div class="page">
     <div class="header">
@@ -862,6 +989,7 @@ function injectSkeleton() {
           </select>
 
           <button id="btnPreview" class="btn">预览命名</button>
+          <button id="btnAutoFillOriginals" class="btn">🪄 自动补全（按首行）</button>
         </div>
 
         <div class="muted" style="margin:8px 0 6px;">
@@ -894,18 +1022,6 @@ function injectSkeleton() {
       </div>
     </div>
   </div>
-
-  <footer class="footer">
-    <div class="footer-inner">
-      <span class="footer-title">🎬 Emby Meta Tool</span>
-      <span class="footer-sep">·</span>
-      <a class="footer-link" href="https://github.com/Zzzwannasleep/emby-meta-tool" target="_blank" rel="noopener noreferrer">
-        GitHub
-      </a>
-      <span class="footer-sep">·</span>
-      <span class="footer-muted">https://github.com/Zzzwannasleep/emby-meta-tool</span>
-    </div>
-  </footer>
   `;
 
   // 注入一套轻量 CSS（Material v3 风格接近）
@@ -939,33 +1055,6 @@ function injectSkeleton() {
   .result-item.active{border-color:#1f6feb;background:rgba(31,111,235,.06);}
   .logs{white-space:pre-wrap;word-break:break-word;border:1px solid rgba(0,0,0,.18);border-radius:12px;padding:10px;background:rgba(0,0,0,.03);min-height:120px;max-height:360px;overflow:auto;}
   .checkbox{display:flex;gap:10px;align-items:center;cursor:pointer;}
-
-  /* ✅ Footer（项目地址） */
-  .footer{
-    max-width:1100px;
-    margin:40px auto 20px;
-    padding:16px 14px 0;
-    border-top:1px dashed rgba(0,0,0,.15);
-    text-align:center;
-  }
-  .footer-inner{
-    font-size:13px;
-    color:#666;
-    display:flex;
-    gap:8px;
-    justify-content:center;
-    align-items:center;
-    flex-wrap:wrap;
-  }
-  .footer-title{font-weight:900;}
-  .footer-link{
-    color:#1f6feb;
-    text-decoration:none;
-    font-weight:800;
-  }
-  .footer-link:hover{ text-decoration:underline; }
-  .footer-sep{color:#999;}
-  .footer-muted{color:#888; word-break:break-all;}
   `;
   document.head.appendChild(style);
 }
@@ -975,4 +1064,14 @@ export function mountUI() {
   bind();
   render();
   log("UI 已加载。");
+}
+
+/**
+ * 兼容一些入口文件可能 import { renderApp } from "./ui"
+ * 你项目里如果用 mountUI 也没问题。
+ */
+export function renderApp(root?: HTMLElement) {
+  // 如果外部传入 root，尽量使用它作为 #app
+  if (root && root.id !== "app") root.id = "app";
+  mountUI();
 }
