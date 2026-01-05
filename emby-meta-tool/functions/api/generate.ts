@@ -41,20 +41,21 @@ export const onRequest = async (context: any) => {
   const manualStructure = (req.manualStructure || null) as
     | null
     | {
-        seasons: number; // 总季数
-        episodesPerSeason?: number; // 每季统一多少集
-        seasonEpisodeMap?: Record<string, number>; // {"1":12,"2":10}
-        episodeTitleTemplate?: string; // "Episode {{ episode }}" or "{{ season_episode }}"
+        seasons: number;
+        episodesPerSeason?: number;
+        seasonEpisodeMap?: Record<string, number>;
+        episodeTitleTemplate?: string;
       };
 
-  // ✅ 重命名配置
+  // ✅ 重命名配置（新增 nfoNameMode）
   const rename = (req.rename || null) as
     | null
     | {
         tvFormat?: string;
         movieFormat?: string;
         customization?: string;
-        originals?: string[]; // 原始文件名列表：一行一个（前端已切好）
+        originals?: string[];
+        nfoNameMode?: "standard" | "same_as_media" | "both";
       };
 
   const stream = new ReadableStream({
@@ -87,7 +88,6 @@ export const onRequest = async (context: any) => {
           [];
         let imageQueue: Array<{ key: string; url: string }> = [];
 
-        // --- 数据源抓取 ---
         if (source === "tmdb") {
           if (!id) throw new Error("TMDB 必须提供 ID（TV/Movie ID）或先检索选择。");
           const tm = mediaType === "movie" ? "movie" : "tv";
@@ -109,9 +109,7 @@ export const onRequest = async (context: any) => {
             imdb: ids.imdb_id ? String(ids.imdb_id) : undefined
           };
 
-          series.genres = (series.genres?.length ? series.genres : (detail.genres || []).map((g: any) => g.name)).filter(
-            Boolean
-          );
+          series.genres = (series.genres?.length ? series.genres : (detail.genres || []).map((g: any) => g.name)).filter(Boolean);
           series.studios = (
             series.studios?.length ? series.studios : (detail.networks || detail.production_companies || []).map((x: any) => x.name)
           ).filter(Boolean);
@@ -121,12 +119,10 @@ export const onRequest = async (context: any) => {
             series.actors = cast.slice(0, 20).map((c: any) => c.name).filter(Boolean);
           }
 
-          // images
           if (detail.poster_path) imageQueue.push({ key: "poster.jpg", url: `https://image.tmdb.org/t/p/original${detail.poster_path}` });
           const backdrops = (detail.images?.backdrops || []).slice(0, 1);
           if (backdrops[0]?.file_path) imageQueue.push({ key: "fanart.jpg", url: `https://image.tmdb.org/t/p/original${backdrops[0].file_path}` });
 
-          // TV seasons/episodes
           if (tm === "tv") {
             if (episodeGroupId) {
               send("progress", { step: "拉取剧集组", current: 0, total: 0, message: `TMDB episode_group ${episodeGroupId}` });
@@ -153,7 +149,6 @@ export const onRequest = async (context: any) => {
               }
             }
 
-            // 回退：按默认 season/episode
             if (!episodes.length) {
               const seasonList = (detail.seasons || []).filter(
                 (s: any) => typeof s.season_number === "number" && s.season_number >= 0
@@ -252,7 +247,7 @@ export const onRequest = async (context: any) => {
           send("progress", { step: "AI 补全", current: 0, total: 0, message: "AI 补全完成" });
         }
 
-        // 3) 生成 Emby 目录结构文件（固定命名，保证 Emby 识别）
+        // 3) 生成 Emby 目录结构
         const rootName = seriesRootFolderName(series.title || "Unknown", series.year || "");
         send("progress", { step: "生成 NFO", current: 0, total: 0, message: `根目录：${rootName}` });
 
@@ -264,6 +259,19 @@ export const onRequest = async (context: any) => {
         for (const e of episodes) seasonSet.add(e.seasonNumber);
 
         const seasonNums = Array.from(seasonSet).sort((a, b) => a - b);
+
+        // 同名 NFO 映射：season-episode -> 原始文件名
+        const originals = Array.isArray(rename?.originals) ? rename!.originals! : [];
+        const sameNameMap = new Map<string, string>();
+        for (const o of originals) {
+          const p = parseSeasonEpisodeFromName(o || "");
+          if (p.season !== null && p.episode !== null) {
+            sameNameMap.set(`${p.season}-${p.episode}`, (o || "").trim());
+          }
+        }
+
+        const nfoNameMode = (rename?.nfoNameMode || "both") as "standard" | "same_as_media" | "both";
+
         for (const sn of seasonNums) {
           const folder = `${rootName}/${seasonFolderName(sn)}`;
           const sObj = seasons.find((x) => x.seasonNumber === sn) || { seasonNumber: sn, title: `Season ${sn}`, plot: "" };
@@ -274,11 +282,26 @@ export const onRequest = async (context: any) => {
             .sort((a, b) => a.episodeNumber - b.episodeNumber);
 
           for (const ep of eps) {
-            files[`${folder}/${episodeNfoName(sn, ep.episodeNumber)}`] = textFile(buildEpisodeNfo(ep));
+            const content = textFile(buildEpisodeNfo(ep));
+
+            // 1) 标准：SxxEyy.nfo（最稳）
+            if (nfoNameMode === "standard" || nfoNameMode === "both") {
+              files[`${folder}/${episodeNfoName(sn, ep.episodeNumber)}`] = content;
+            }
+
+            // 2) 同名：<媒体同名>.nfo（仅当 originals 能解析出该集）
+            if (nfoNameMode === "same_as_media" || nfoNameMode === "both") {
+              const orig = sameNameMap.get(`${sn}-${ep.episodeNumber}`);
+              if (orig) {
+                const base = splitExt(orig).base;
+                const safe = base.replace(/[\\:*?"<>|]/g, "_");
+                files[`${folder}/${safe}.nfo`] = content;
+              }
+            }
           }
         }
 
-        // 4) 下载图片（带流控）
+        // 4) 图片下载（如有）
         if (imageQueue.length) {
           send("progress", { step: "下载图片", current: 0, total: imageQueue.length, message: `共 ${imageQueue.length} 张` });
           const imgMap = await downloadImagesToMap(
@@ -289,7 +312,7 @@ export const onRequest = async (context: any) => {
           for (const [k, v] of Object.entries(imgMap)) files[k] = v;
         }
 
-        // 5) 重命名 mapping（MoviePilot 风格：简化 jinja2 + 自动解析季集）
+        // 5) 重命名 mapping（仍输出 rename_map.csv）
         if (rename?.originals?.length) {
           send("progress", { step: "生成重命名", current: 0, total: 0, message: `原始文件数：${rename.originals.length}` });
 
@@ -303,7 +326,6 @@ export const onRequest = async (context: any) => {
           const csvLines: string[] = ["original,new"];
           const preview: string[] = [];
 
-          // ✅ epsSorted 只声明一次
           const epsSorted = [...episodes].sort(
             (a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber
           );
@@ -332,7 +354,6 @@ export const onRequest = async (context: any) => {
             if (mediaType === "movie") {
               newPath = renderRenameTemplate(movieFormat, ctxBase);
             } else {
-              // ✅ 优先解析原始文件名里的 season/episode
               const parsed = parseSeasonEpisodeFromName(original);
 
               let s: number;
@@ -347,7 +368,6 @@ export const onRequest = async (context: any) => {
                 episodeTitle = hit?.title || "";
                 episodeDate = hit?.aired || "";
               } else {
-                // ✅ 解析不到就按顺序回退
                 const ep = epsSorted[fallbackIdx] || null;
                 s = ep?.seasonNumber || 1;
                 e = ep?.episodeNumber || (fallbackIdx + 1);
@@ -388,7 +408,9 @@ export const onRequest = async (context: any) => {
         const key = `zips/${rootName}-${stamp}.zip`;
 
         if (!env.META_BUCKET) {
-          throw new Error("R2 未绑定：请在 Pages -> Settings -> Bindings 绑定 R2 Bucket 到变量名 META_BUCKET（Production 环境也要绑）。");
+          throw new Error(
+            "R2 未绑定：请在 Pages -> Settings -> Bindings 绑定 R2 Bucket 到变量名 META_BUCKET（Production 环境也要绑）。"
+          );
         }
 
         await env.META_BUCKET.put(key, zip, { httpMetadata: { contentType: "application/zip" } });
