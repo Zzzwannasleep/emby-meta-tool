@@ -280,11 +280,14 @@ export const onRequest = async (context: any) => {
           // 依据 episodes 列表给 tv 做顺序匹配；movie 就全部同名不同 ext
           const epsSorted = [...episodes].sort((a, b) => (a.seasonNumber - b.seasonNumber) || (a.episodeNumber - b.episodeNumber));
 
+                    // 依据 episodes 列表给 tv 做顺序匹配；但现在：优先从原名解析 S/E
+          const epsSorted = [...episodes].sort((a, b) => (a.seasonNumber - b.seasonNumber) || (a.episodeNumber - b.episodeNumber));
           let epIdx = 0;
 
           for (let i = 0; i < rename.originals.length; i++) {
             const original = rename.originals[i] || "";
             const { ext } = splitExt(original);
+
             const ctxBase: any = {
               title: series.title || "",
               en_title: "",
@@ -296,6 +299,55 @@ export const onRequest = async (context: any) => {
               fileExt: ext || "",
               customization: rename.customization || ""
             };
+
+            let newPath = "";
+
+            if (mediaType === "movie") {
+              newPath = renderRenameTemplate(movieFormat, ctxBase);
+            } else {
+              // ✅ 1) 优先从文件名解析 season/episode
+              const parsed = parseSeasonEpisodeFromName(original);
+
+              let s: number;
+              let e: number;
+              let episodeTitle = "";
+
+              if (parsed.season !== null && parsed.episode !== null) {
+                s = parsed.season;
+                e = parsed.episode;
+
+                // 尝试从抓取到的 episodes 里找标题（可选）
+                const hit = epsSorted.find((x) => x.seasonNumber === s && x.episodeNumber === e);
+                episodeTitle = hit?.title || "";
+              } else {
+                // ✅ 2) 解析不到就按顺序匹配（保持兼容）
+                const ep = epsSorted[epIdx] || null;
+                s = ep?.seasonNumber || 1;
+                e = ep?.episodeNumber || (epIdx + 1);
+                episodeTitle = ep?.title || "";
+                epIdx++;
+              }
+
+              const ctxTv = {
+                ...ctxBase,
+                season: s,
+                episode: e,
+                season_episode: seasonEpisode(s, e),
+                episode_title: episodeTitle,
+                episode_date: "",   // 需要的话可填 ep.aired
+                season_year: ""
+              };
+
+              newPath = renderRenameTemplate(tvFormat, ctxTv);
+            }
+
+            newPath = sanitizePathLike(newPath);
+            if (!newPath) newPath = sanitizePathLike(original);
+
+            csvLines.push(`${csvEscape(original)},${csvEscape(newPath)}`);
+            preview.push(`${original}  ->  ${newPath}`);
+          }
+
 
             let newPath = "";
 
@@ -394,4 +446,5 @@ function csvEscape(s: string) {
   if (/[,"\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
   return v;
 }
+
 
