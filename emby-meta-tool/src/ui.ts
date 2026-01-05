@@ -1,524 +1,945 @@
-import "@material/web/button/filled-button.js";
-import "@material/web/button/outlined-button.js";
-import "@material/web/textfield/filled-text-field.js";
-import "@material/web/select/filled-select.js";
-import "@material/web/select/select-option.js";
-import "@material/web/progress/linear-progress.js";
-import "@material/web/chips/filter-chip.js";
-import { postSSE } from "./sse";
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
-type Source = "tmdb" | "bangumi" | "anidb" | "manual";
+/**
+ * UI（Material Web / Material v3 风格）
+ * - 搜索 / 选择条目
+ * - TMDB Episode Groups 列表展示与选择
+ * - 一键生成并打包下载（SSE 进度）
+ * - 重命名（MoviePilot 模板）+ NFO 命名模式（standard / same_as_media / both）
+ * - 预览界面：展示媒体重命名路径 + NFO 输出文件名预览
+ *
+ * 依赖后端接口：
+ * - POST /api/search
+ * - POST /api/episode-groups
+ * - POST /api/generate  （SSE：progress/done/error）
+ * - POST /api/preview
+ */
+
 type MediaType = "tv" | "movie" | "anime";
+type SourceType = "tmdb" | "bangumi" | "anidb" | "manual";
+type NfoNameMode = "standard" | "same_as_media" | "both";
 
 type SearchItem = {
-  source: Source;
   id: string;
   title: string;
+  originalTitle?: string;
   year?: string;
-  subtitle?: string;
+  type?: MediaType;
   poster?: string;
-  raw?: any;
+  extra?: any;
 };
 
 type EpisodeGroupItem = {
   id: string;
   name: string;
   description?: string;
+  episode_count?: number;
+  group_count?: number;
 };
 
-const el = (html: string) => {
-  const t = document.createElement("template");
-  t.innerHTML = html.trim();
-  return t.content.firstElementChild as HTMLElement;
+type ManualStructure = {
+  seasons: number;
+  episodesPerSeason?: number;
+  seasonEpisodeMapText?: string; // "1:12,2:10"
+  episodeTitleTemplate?: string;
 };
 
-export function renderApp(root: HTMLElement) {
-  const state = {
-    source: "tmdb" as Source,
-    mediaType: "tv" as MediaType,
-    query: "",
-    id: "",
-    lang: "zh-CN",
-    tmdbEpisodeGroupId: "",
-    selected: null as SearchItem | null,
-    groups: [] as EpisodeGroupItem[],
+type RenameConfig = {
+  tvFormat: string;
+  movieFormat: string;
+  customization: string;
+  originalsText: string;
+  nfoNameMode: NfoNameMode;
+};
 
-    manual: {
-      title: "",
-      originalTitle: "",
-      year: "",
-      plot: "",
-      premiered: "",
-      rating: "",
-      genres: "",
-      studios: "",
-      actors: ""
-    },
+type ManualMeta = {
+  title: string;
+  originalTitle: string;
+  year: string;
+  plot: string;
+  premiered: string;
+  rating: string;
+  genres: string;
+  studios: string;
+  actors: string;
+};
 
-    // ✅ 手动季集结构
-    manualStructure: {
-      seasons: "1",
-      episodesPerSeason: "12",
-      seasonEpisodeMap: "", // e.g. 1:12,2:10
-      episodeTitleTemplate: "Episode {{ episode }}"
-    },
+type State = {
+  source: SourceType;
+  mediaType: MediaType;
+  lang: string;
 
-    // ✅ 重命名
-    rename: {
-      tvFormat: `{{ title }}{% if year %} ({{ year }}){% endif %}/Season {{ season }}/{{ title }} - {{ season_episode }}{% if episode_title %} - {{ episode_title }}{% endif %}{{ fileExt }}`,
-      movieFormat: `{{ title }}{% if year %} ({{ year }}){% endif %}/{{ title }}{% if year %} ({{ year }}){% endif %}{{ fileExt }}`,
-      customization: "",
-      originals: ""
-    },
+  query: string;
+  idInput: string;
 
-    useAI: false,
-    logs: [] as string[],
-    running: false,
-    progress: { step: "", current: 0, total: 0 }
-  };
+  // 选择结果
+  selected: SearchItem | null;
 
-  const app = el(`
-    <div class="container">
-      <div class="header">
-        <div style="font-size:20px;font-weight:700;">Emby 元数据生成 / 打包下载</div>
-        <div class="muted">支持 TMDB/Bangumi/AniDB/纯手动；支持 TMDB 剧集组；支持 MoviePilot 风格重命名映射</div>
-      </div>
+  // episode group
+  episodeGroups: EpisodeGroupItem[];
+  episodeGroupId: string;
 
-      <div class="card grid">
-        <div class="grid2">
-          <div class="grid">
-            <md-filled-select id="source" label="数据源">
-              <md-select-option value="tmdb" selected><div slot="headline">TMDB</div></md-select-option>
-              <md-select-option value="bangumi"><div slot="headline">Bangumi</div></md-select-option>
-              <md-select-option value="anidb"><div slot="headline">AniDB（标题索引走R2）</div></md-select-option>
-              <md-select-option value="manual"><div slot="headline">纯手动（不抓取）</div></md-select-option>
-            </md-filled-select>
+  // AI
+  useAI: boolean;
 
-            <md-filled-select id="mediaType" label="内容类型">
-              <md-select-option value="tv" selected><div slot="headline">电视剧 / 番剧（TV）</div></md-select-option>
-              <md-select-option value="movie"><div slot="headline">电影（Movie）</div></md-select-option>
-              <md-select-option value="anime"><div slot="headline">动漫（Anime，仍按 TV 结构输出）</div></md-select-option>
-            </md-filled-select>
+  // manual
+  manual: ManualMeta;
+  manualStructure: ManualStructure;
 
-            <md-filled-text-field id="query" label="标题检索（可空；一键生成时可自动检索）"></md-filled-text-field>
-            <md-filled-text-field id="id" label="直接输入ID（可空，优先于标题；manual模式可空）"></md-filled-text-field>
+  // rename
+  rename: RenameConfig;
 
-            <div class="row">
-              <md-filled-text-field id="lang" label="语言（TMDB/Bangumi）" value="zh-CN" style="min-width:180px;"></md-filled-text-field>
-              <md-outlined-button id="btnSearch">检索</md-outlined-button>
-            </div>
+  // UI
+  busy: boolean;
+  status: string;
+  logs: string[];
+};
 
-            <div class="row">
-              <md-filled-text-field id="episodeGroup" label="TMDB 剧集组ID（可选，仅 TV）" style="flex:1;"></md-filled-text-field>
-              <md-outlined-button id="btnGroups">查剧集组</md-outlined-button>
-            </div>
+const state: State = {
+  source: "tmdb",
+  mediaType: "tv",
+  lang: "zh-CN",
 
-            <div>
-              <div class="muted" style="margin:6px 0 8px 2px;">剧集组列表（点击“使用这个剧集组”自动填入 groupId）</div>
-              <div class="results" id="groupResults"></div>
-            </div>
+  query: "",
+  idInput: "",
 
-            <div class="row">
-              <md-filter-chip id="chipAI" label="AI 自动补全缺失字段"></md-filter-chip>
-            </div>
+  selected: null,
 
-            <div class="row">
-              <md-filled-button id="btnGenerate">一键生成并打包下载</md-filled-button>
-              <span class="muted">不需要先点“选择”：如果没选中会自动检索并取最匹配</span>
-            </div>
-          </div>
+  episodeGroups: [],
+  episodeGroupId: "",
 
-          <div class="grid">
-            <div style="font-weight:700;">手动填写（可选，用于覆盖/补全）</div>
-            <div class="grid2">
-              <md-filled-text-field id="mTitle" label="标题"></md-filled-text-field>
-              <md-filled-text-field id="mOriginal" label="原名"></md-filled-text-field>
-            </div>
-            <div class="grid2">
-              <md-filled-text-field id="mYear" label="年份"></md-filled-text-field>
-              <md-filled-text-field id="mPremiered" label="首播/上映日期（YYYY-MM-DD）"></md-filled-text-field>
-            </div>
-            <md-filled-text-field id="mPlot" label="简介/剧情" type="textarea"></md-filled-text-field>
-            <div class="grid2">
-              <md-filled-text-field id="mRating" label="评分（0-10）"></md-filled-text-field>
-              <md-filled-text-field id="mGenres" label="类型（逗号分隔）"></md-filled-text-field>
-            </div>
-            <div class="grid2">
-              <md-filled-text-field id="mStudios" label="制作公司/工作室（逗号）"></md-filled-text-field>
-              <md-filled-text-field id="mActors" label="演员（逗号）"></md-filled-text-field>
-            </div>
+  useAI: false,
 
-            <div style="margin-top:6px;font-weight:700;">手动季/集结构（manual 模式或想补齐时）</div>
-            <div class="grid2">
-              <md-filled-text-field id="msSeasons" label="总季数" value="1"></md-filled-text-field>
-              <md-filled-text-field id="msEpsPer" label="每季集数（统一）" value="12"></md-filled-text-field>
-            </div>
-            <md-filled-text-field id="msMap" label="每季集数映射（可选：1:12,2:10,3:8）"></md-filled-text-field>
-            <md-filled-text-field id="msEpTpl" label="集标题模板（可选）" value="Episode {{ episode }}"></md-filled-text-field>
+  manual: {
+    title: "",
+    originalTitle: "",
+    year: "",
+    plot: "",
+    premiered: "",
+    rating: "",
+    genres: "",
+    studios: "",
+    actors: ""
+  },
 
-            <div style="margin-top:6px;font-weight:700;">重命名（生成媒体文件重命名映射，打包进 zip/rename）</div>
-            <md-filled-text-field id="rTvFmt" label="TV_RENAME_FORMAT（简化jinja2）" type="textarea"></md-filled-text-field>
-            <md-filled-text-field id="rMovieFmt" label="MOVIE_RENAME_FORMAT（简化jinja2）" type="textarea"></md-filled-text-field>
-            <md-filled-text-field id="rCustom" label="customization（可选）"></md-filled-text-field>
-            <md-filled-text-field id="rOriginals" label="原始文件名列表（一行一个；可包含扩展名）" type="textarea"></md-filled-text-field>
-            <div class="muted">提示：会输出 rename/rename_map.csv（original,new）</div>
-          </div>
-        </div>
+  manualStructure: {
+    seasons: 1,
+    episodesPerSeason: 12,
+    seasonEpisodeMapText: "",
+    episodeTitleTemplate: "Episode {{ episode }}"
+  },
 
-        <div>
-          <md-linear-progress id="progressBar" value="0" max="1"></md-linear-progress>
-          <div class="muted" id="progressText">未开始</div>
-        </div>
+  rename: {
+    tvFormat:
+      "{{ title }}{% if year %} ({{ year }}){% endif %}/Season {{ season }}/{{ title }} - {{ season_episode }}{% if episode_title %} - {{ episode_title }}{% endif %}{{ fileExt }}",
+    movieFormat:
+      "{{ title }}{% if year %} ({{ year }}){% endif %}/{{ title }}{% if year %} ({{ year }}){% endif %}{{ fileExt }}",
+    customization: "",
+    originalsText: "",
+    nfoNameMode: "both"
+  },
 
-        <div class="grid2">
-          <div>
-            <div style="font-weight:700;margin-bottom:8px;">检索结果（点击选择可更精确）</div>
-            <div class="results" id="results"></div>
-          </div>
-          <div>
-            <div style="font-weight:700;margin-bottom:8px;">任务日志</div>
-            <div class="progress-log" id="logs"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `);
+  busy: false,
+  status: "",
+  logs: []
+};
 
-  root.appendChild(app);
-  const $ = <T extends HTMLElement>(id: string) => app.querySelector<T>("#" + id)!;
-
-  // 初始化默认模板
-  ($("rTvFmt") as any).value = state.rename.tvFormat;
-  ($("rMovieFmt") as any).value = state.rename.movieFormat;
-
-  const log = (s: string) => {
-    state.logs.unshift(`[${new Date().toLocaleTimeString()}] ${s}`);
-    if (state.logs.length > 300) state.logs.pop();
-    $("logs").textContent = state.logs.join("\n");
-  };
-
-  const setProgress = (step: string, current = 0, total = 0) => {
-    state.progress = { step, current, total };
-    const ratio = total > 0 ? Math.min(1, current / total) : (state.running ? 0.2 : 0);
-    const bar = $("progressBar") as any;
-    bar.value = ratio;
-    bar.max = 1;
-    $("progressText").textContent = total > 0 ? `${step}（${current}/${total}）` : step;
-  };
-
-  const clearGroupResults = (msg?: string) => {
-    const box = $("groupResults");
-    box.innerHTML = "";
-    if (msg) box.appendChild(el(`<div class="muted">${escapeHtml(msg)}</div>`));
-  };
-
-  const renderGroups = (groups: EpisodeGroupItem[]) => {
-    const box = $("groupResults");
-    box.innerHTML = "";
-    if (!groups?.length) {
-      box.appendChild(el(`<div class="muted">该剧没有可用剧集组</div>`));
-      return;
-    }
-    for (const g of groups) {
-      const node = el(`
-        <div class="result-item">
-          <div class="row" style="justify-content:space-between;">
-            <div style="font-weight:700;">${escapeHtml(g.name)}</div>
-            <div class="muted">groupId=${escapeHtml(g.id)}</div>
-          </div>
-          ${g.description ? `<div class="muted">${escapeHtml(g.description)}</div>` : ""}
-          <div class="row">
-            <md-outlined-button>使用这个剧集组</md-outlined-button>
-          </div>
-        </div>
-      `);
-      node.querySelector("md-outlined-button")!.addEventListener("click", () => {
-        ($("episodeGroup") as any).value = g.id;
-        state.tmdbEpisodeGroupId = g.id;
-        log(`已选定剧集组：${g.name}（${g.id}）`);
-      });
-      box.appendChild(node);
-    }
-  };
-
-  const renderResults = (items: SearchItem[]) => {
-    const box = $("results");
-    box.innerHTML = "";
-    if (!items.length) {
-      box.appendChild(el(`<div class="muted">无结果</div>`));
-      return;
-    }
-    for (const it of items) {
-      const node = el(`
-        <div class="result-item">
-          <div class="row" style="justify-content:space-between;">
-            <div style="font-weight:700;">${escapeHtml(it.title)}</div>
-            <div class="muted">${it.source.toUpperCase()} #${escapeHtml(it.id)} ${it.year ? `(${escapeHtml(it.year)})` : ""}</div>
-          </div>
-          ${it.subtitle ? `<div class="muted">${escapeHtml(it.subtitle)}</div>` : ""}
-          <div class="row">
-            <md-outlined-button>选择</md-outlined-button>
-            ${it.poster ? `<img src="${it.poster}" style="height:64px;border-radius:10px;object-fit:cover;" />` : ""}
-          </div>
-        </div>
-      `);
-
-      node.querySelector("md-outlined-button")!.addEventListener("click", () => {
-        state.selected = it;
-        log(`已选择：${it.title}（${it.source} #${it.id}）`);
-        clearGroupResults("已选择新条目，可点击“查剧集组”获取该剧的剧集组。");
-        if (!state.manual.title) ($("mTitle") as any).value = it.title;
-      });
-
-      box.appendChild(node);
-    }
-  };
-
-  const parseSeasonMap = (s: string): Record<string, number> => {
-    const out: Record<string, number> = {};
-    const txt = (s || "").trim();
-    if (!txt) return out;
-    const parts = txt.split(/[,，]/g).map((x) => x.trim()).filter(Boolean);
-    for (const p of parts) {
-      const [k, v] = p.split(":").map((x) => x.trim());
-      const n = Number(v);
-      if (k && Number.isFinite(n) && n > 0) out[k] = Math.floor(n);
-    }
-    return out;
-  };
-
-  const getInputs = () => {
-    state.source = (($("source") as any).value || "tmdb") as Source;
-    state.mediaType = (($("mediaType") as any).value || "tv") as MediaType;
-    state.query = ($("query") as any).value || "";
-    state.id = ($("id") as any).value || "";
-    state.lang = ($("lang") as any).value || "zh-CN";
-    state.tmdbEpisodeGroupId = ($("episodeGroup") as any).value || "";
-
-    state.manual.title = ($("mTitle") as any).value || "";
-    state.manual.originalTitle = ($("mOriginal") as any).value || "";
-    state.manual.year = ($("mYear") as any).value || "";
-    state.manual.premiered = ($("mPremiered") as any).value || "";
-    state.manual.plot = ($("mPlot") as any).value || "";
-    state.manual.rating = ($("mRating") as any).value || "";
-    state.manual.genres = ($("mGenres") as any).value || "";
-    state.manual.studios = ($("mStudios") as any).value || "";
-    state.manual.actors = ($("mActors") as any).value || "";
-
-    state.manualStructure.seasons = ($("msSeasons") as any).value || "1";
-    state.manualStructure.episodesPerSeason = ($("msEpsPer") as any).value || "12";
-    state.manualStructure.seasonEpisodeMap = ($("msMap") as any).value || "";
-    state.manualStructure.episodeTitleTemplate = ($("msEpTpl") as any).value || "Episode {{ episode }}";
-
-    state.rename.tvFormat = ($("rTvFmt") as any).value || "";
-    state.rename.movieFormat = ($("rMovieFmt") as any).value || "";
-    state.rename.customization = ($("rCustom") as any).value || "";
-    state.rename.originals = ($("rOriginals") as any).value || "";
-  };
-
-  $("chipAI").addEventListener("click", () => {
-    state.useAI = !state.useAI;
-    const chip = $("chipAI") as any;
-    chip.selected = state.useAI;
-    log(state.useAI ? "已开启：AI 自动补全" : "已关闭：AI 自动补全");
-  });
-
-  $("btnSearch").addEventListener("click", async () => {
-    getInputs();
-    state.running = true;
-    setProgress("检索中…");
-    log(`开始检索：source=${state.source}, query=${state.query || "-"}, id=${state.id || "-"}`);
-
-    state.selected = null;
-    clearGroupResults("请先从检索结果中选择一个 TMDB TV 条目，然后再查剧集组。");
-
-    try {
-      const items = await doSearch(state.source, state.mediaType, state.lang, state.id, state.query);
-      renderResults(items);
-      log(`检索完成：${items.length} 条`);
-      setProgress("检索完成");
-    } catch (e: any) {
-      log(`检索失败：${e?.message || e}`);
-      setProgress("检索失败");
-    } finally {
-      state.running = false;
-    }
-  });
-
-  $("btnGroups").addEventListener("click", async () => {
-    getInputs();
-
-    if (state.source !== "tmdb") {
-      log("只有 TMDB 支持剧集组检索");
-      return;
-    }
-    if (state.mediaType === "movie") {
-      log("电影没有 TMDB Episode Groups（请切换为 TV）");
-      return;
-    }
-
-    const tvId = state.selected?.id || state.id;
-    if (!tvId) {
-      log("请先检索并选择一个 TMDB TV 条目（或在“直接输入ID”里填 TV ID）");
-      clearGroupResults("缺少 TMDB TV ID：请先选择一个 TV 条目。");
-      return;
-    }
-
-    state.running = true;
-    setProgress("获取剧集组…");
-    clearGroupResults("获取中…");
-    log(`获取剧集组：tvId=${tvId}`);
-
-    try {
-      const url = new URL("/api/tmdb-episode-groups", location.origin);
-      url.searchParams.set("tvId", tvId);
-
-      const res = await fetch(url.toString());
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "获取失败");
-
-      const groups: EpisodeGroupItem[] = data.groups || [];
-      state.groups = groups;
-
-      if (!groups.length) {
-        log("未找到剧集组（或该剧没有剧集组）");
-        clearGroupResults("未找到剧集组（或该剧没有剧集组）");
-      } else {
-        log(`找到剧集组：${groups.length} 个（页面已展示，可一键使用）`);
-        renderGroups(groups);
-      }
-      setProgress("剧集组获取完成");
-    } catch (e: any) {
-      log(`剧集组获取失败：${e?.message || e}`);
-      setProgress("剧集组获取失败");
-      clearGroupResults(`剧集组获取失败：${e?.message || e}`);
-    } finally {
-      state.running = false;
-    }
-  });
-
-  // ✅ 一键生成：自动检索/自动选中/然后 SSE 生成
-  $("btnGenerate").addEventListener("click", async () => {
-    getInputs();
-
-    // 一键逻辑：如果不是 manual 且没有 id/selected，但有 query => 自动 search 并自动选一个
-    if (state.source !== "manual" && !state.id && !state.selected?.id && state.query.trim()) {
-      log("未选择条目，开始自动检索并选择最匹配结果…");
-      try {
-        const items = await doSearch(state.source, state.mediaType, state.lang, "", state.query);
-        renderResults(items);
-
-        if (!items.length) {
-          log("自动检索无结果：请检查标题或改用手动模式");
-          return;
-        }
-
-        // 只有 1 条就直接用；多条取第一条并提醒
-        state.selected = items[0];
-        log(items.length === 1
-          ? `自动选中：${items[0].title}（唯一匹配）`
-          : `自动选中：${items[0].title}（共${items.length}条，建议先手动选择更精确的条目）`
-        );
-      } catch (e: any) {
-        log(`自动检索失败：${e?.message || e}`);
-        return;
-      }
-    }
-
-    const base = state.selected?.id || state.id || null;
-
-    // manual 模式允许 base 为 null，但 title 最好有
-    if (state.source === "manual" && !state.manual.title) {
-      log("纯手动模式：请至少填写“标题”");
-      return;
-    }
-
-    if (state.source !== "manual" && !base && !state.manual.title) {
-      log("请先选择条目 / 输入ID / 或至少手工填写标题");
-      return;
-    }
-
-    state.logs = [];
-    $("logs").textContent = "";
-    state.running = true;
-    setProgress("开始生成…");
-    log("开始生成任务（SSE）…");
-
-    const originals = state.rename.originals
-      .split("\n")
-      .map((x) => x.trim())
-      .filter(Boolean);
-
-    const payload = {
-      source: state.source,
-      mediaType: state.mediaType,
-      lang: state.lang,
-      id: base,
-      episodeGroupId: state.tmdbEpisodeGroupId || null,
-      useAI: state.useAI,
-      manual: state.manual,
-
-      manualStructure: {
-        seasons: Number(state.manualStructure.seasons || "1"),
-        episodesPerSeason: Number(state.manualStructure.episodesPerSeason || "1"),
-        seasonEpisodeMap: parseSeasonMap(state.manualStructure.seasonEpisodeMap),
-        episodeTitleTemplate: state.manualStructure.episodeTitleTemplate || "Episode {{ episode }}"
-      },
-
-      rename: {
-        tvFormat: state.rename.tvFormat,
-        movieFormat: state.rename.movieFormat,
-        customization: state.rename.customization,
-        originals
-      }
-    };
-
-    try {
-      await postSSE("/api/generate", payload, (msg) => {
-        if (msg.event === "progress") {
-          const { step, current, total, message } = msg.data || {};
-          if (message) log(message);
-          setProgress(step || "处理中…", current || 0, total || 0);
-        }
-        if (msg.event === "error") {
-          log(`错误：${msg.data?.message || "未知错误"}`);
-          setProgress("失败");
-        }
-        if (msg.event === "done") {
-          const { downloadUrl } = msg.data || {};
-          log("生成完成 ✅");
-          setProgress("生成完成");
-          if (downloadUrl) {
-            log(`下载：${downloadUrl}`);
-            window.open(downloadUrl, "_blank");
-          }
-        }
-      });
-    } catch (e: any) {
-      log(`生成失败：${e?.message || e}`);
-      setProgress("生成失败");
-    } finally {
-      state.running = false;
-    }
-  });
-
-  clearGroupResults("提示：先用 TMDB 搜索并选择 TV 条目，再点击“查剧集组”；或直接点“一键生成”自动检索。");
-}
-
-async function doSearch(source: string, mediaType: string, lang: string, id: string, q: string): Promise<SearchItem[]> {
-  const url = new URL("/api/search", location.origin);
-  url.searchParams.set("source", source);
-  url.searchParams.set("mediaType", mediaType);
-  if (lang) url.searchParams.set("lang", lang);
-  if (id) url.searchParams.set("id", id);
-  if (q) url.searchParams.set("q", q);
-
-  const res = await fetch(url.toString());
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error || "检索失败");
-  return (data.items || []) as SearchItem[];
+function $(id: string) {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`Missing element #${id}`);
+  return el;
 }
 
 function escapeHtml(s: string) {
-  return (s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
+  return (s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function setBusy(v: boolean, status?: string) {
+  state.busy = v;
+  if (typeof status === "string") state.status = status;
+
+  const btn = $("btnGenerate") as HTMLButtonElement;
+  (btn as any).disabled = v;
+
+  const btnPrev = $("btnPreview") as HTMLButtonElement;
+  (btnPrev as any).disabled = v;
+
+  const btnSearch = $("btnSearch") as HTMLButtonElement;
+  (btnSearch as any).disabled = v;
+
+  const btnGroups = $("btnEpisodeGroups") as HTMLButtonElement;
+  (btnGroups as any).disabled = v;
+
+  renderStatus();
+}
+
+function log(line: string) {
+  state.logs.unshift(`[${new Date().toLocaleTimeString()}] ${line}`);
+  if (state.logs.length > 200) state.logs.length = 200;
+  renderLogs();
+}
+
+function renderStatus() {
+  const el = $("status");
+  el.textContent = state.status || (state.busy ? "处理中…" : "");
+}
+
+function renderLogs() {
+  const el = $("logs");
+  el.textContent = state.logs.join("\n");
+}
+
+function parseSeasonMap(text: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  const s = (text || "").trim();
+  if (!s) return out;
+  for (const seg of s.split(",")) {
+    const t = seg.trim();
+    if (!t) continue;
+    const m = t.match(/^(\d+)\s*:\s*(\d+)$/);
+    if (!m) continue;
+    out[m[1]] = Math.max(1, parseInt(m[2], 10));
+  }
+  return out;
+}
+
+function getOriginalsList(): string[] {
+  return (state.rename.originalsText || "")
+    .split("\n")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function buildEpisodesFromManualStructure() {
+  // 用于 preview：我们只需要 season/episode 列表（不强依赖真实标题）
+  const seasons = Math.max(1, Number(state.manualStructure.seasons || 1));
+  const per = state.manualStructure.episodesPerSeason ? Math.max(1, Number(state.manualStructure.episodesPerSeason)) : 1;
+  const map = parseSeasonMap(state.manualStructure.seasonEpisodeMapText || "");
+  const eps: Array<{ seasonNumber: number; episodeNumber: number; title?: string }> = [];
+
+  for (let s = 1; s <= seasons; s++) {
+    const cnt = map[String(s)] || per;
+    for (let e = 1; e <= cnt; e++) {
+      eps.push({ seasonNumber: s, episodeNumber: e, title: "" });
+    }
+  }
+  return eps;
+}
+
+function getSeriesForRequest() {
+  // 以“手动标题优先”，其次用 selected
+  const title = state.manual.title || state.selected?.title || "";
+  const year = state.manual.year || state.selected?.year || "";
+  const originalTitle = state.manual.originalTitle || state.selected?.originalTitle || "";
+  return { title, year, originalTitle };
+}
+
+/** ---------------------------
+ * API 调用（如参数不一致，只需改这 2-3 个函数）
+ * --------------------------*/
+
+async function apiSearch(): Promise<SearchItem[]> {
+  // 你仓库里的 /api/search 若参数不同，改这里即可
+  const payload: any = {
+    source: state.source,
+    mediaType: state.mediaType,
+    lang: state.lang
+  };
+
+  // 支持 “直接输入 ID”
+  const id = (state.idInput || "").trim();
+  const q = (state.query || "").trim();
+
+  if (id) payload.id = id;
+  if (q) payload.query = q;
+
+  const res = await fetch("/api/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `search failed: ${res.status}`);
+
+  // 允许后端返回 { items: [...] } 或直接 [...]
+  const items = Array.isArray(data) ? data : data.items;
+  if (!Array.isArray(items)) return [];
+  return items.map((x: any) => ({
+    id: String(x.id),
+    title: x.title || x.name || "",
+    originalTitle: x.originalTitle || x.original_name || x.original_title || "",
+    year: x.year || (x.first_air_date || x.release_date || "").slice(0, 4) || "",
+    type: x.type || state.mediaType,
+    poster: x.poster || x.poster_path || "",
+    extra: x
+  }));
+}
+
+async function apiEpisodeGroups(): Promise<EpisodeGroupItem[]> {
+  // 仅 TMDB TV 有意义
+  if (state.source !== "tmdb") return [];
+  if (state.mediaType !== "tv") return [];
+
+  const selectedId = state.selected?.id || (state.idInput || "").trim();
+  if (!selectedId) throw new Error("请先选择一个 TMDB TV 条目。");
+
+  const payload: any = {
+    tmdbTvId: selectedId,
+    lang: state.lang
+  };
+
+  const res = await fetch("/api/episode-groups", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `episode-groups failed: ${res.status}`);
+
+  const items = Array.isArray(data) ? data : data.items;
+  if (!Array.isArray(items)) return [];
+
+  return items.map((x: any) => ({
+    id: String(x.id),
+    name: x.name || "",
+    description: x.description || "",
+    episode_count: x.episode_count,
+    group_count: x.group_count
+  }));
+}
+
+async function apiPreview() {
+  const originals = getOriginalsList();
+  const series = getSeriesForRequest();
+  const episodes = buildEpisodesFromManualStructure();
+
+  const payload: any = {
+    mediaType: state.mediaType,
+    series,
+    episodes,
+    rename: {
+      tvFormat: state.rename.tvFormat,
+      movieFormat: state.rename.movieFormat,
+      customization: state.rename.customization,
+      originals,
+      nfoNameMode: state.rename.nfoNameMode
+    }
+  };
+
+  const res = await fetch("/api/preview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `preview failed: ${res.status}`);
+
+  return data;
+}
+
+function buildGeneratePayload() {
+  const series = getSeriesForRequest();
+
+  // 后端 generate.ts 预期字段（你现在 generate.ts 如果名字不同，改这里）
+  const payload: any = {
+    source: state.source,
+    mediaType: state.mediaType,
+    lang: state.lang,
+
+    // 优先使用选中条目
+    id: state.selected?.id || (state.idInput || "").trim() || null,
+
+    // TMDB episode group
+    episodeGroupId: state.episodeGroupId || null,
+
+    useAI: state.useAI,
+
+    manual: {
+      title: state.manual.title,
+      originalTitle: state.manual.originalTitle,
+      year: state.manual.year,
+      plot: state.manual.plot,
+      premiered: state.manual.premiered,
+      rating: state.manual.rating,
+      genres: state.manual.genres,
+      studios: state.manual.studios,
+      actors: state.manual.actors
+    },
+
+    manualStructure: {
+      seasons: Number(state.manualStructure.seasons || 1),
+      episodesPerSeason: Number(state.manualStructure.episodesPerSeason || 1),
+      seasonEpisodeMap: parseSeasonMap(state.manualStructure.seasonEpisodeMapText || ""),
+      episodeTitleTemplate: state.manualStructure.episodeTitleTemplate || "Episode {{ episode }}"
+    },
+
+    rename: {
+      tvFormat: state.rename.tvFormat,
+      movieFormat: state.rename.movieFormat,
+      customization: state.rename.customization,
+      originals: getOriginalsList(),
+      nfoNameMode: state.rename.nfoNameMode
+    }
+  };
+
+  // manual source 时允许 id 为空
+  if (payload.source === "manual") payload.id = null;
+
+  return payload;
+}
+
+async function startGenerateAndDownload() {
+  const payload = buildGeneratePayload();
+
+  const res = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok || !res.body) {
+    const t = await res.text().catch(() => "");
+    throw new Error(t || `generate failed: ${res.status}`);
+  }
+
+  // SSE
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  const setProgressText = (msg: string) => {
+    state.status = msg;
+    renderStatus();
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE event blocks separated by \n\n
+    while (true) {
+      const idx = buffer.indexOf("\n\n");
+      if (idx < 0) break;
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+
+      const lines = block.split("\n");
+      let ev = "message";
+      let dataLine = "";
+
+      for (const line of lines) {
+        if (line.startsWith("event:")) ev = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLine += line.slice(5).trim();
+      }
+
+      const data = dataLine ? JSON.parse(dataLine) : {};
+
+      if (ev === "progress") {
+        const msg = data?.message
+          ? `${data.step || "处理中"}：${data.message}`
+          : `${data.step || "处理中"}…`;
+        setProgressText(msg);
+      } else if (ev === "done") {
+        const url = data?.downloadUrl;
+        if (url) {
+          log("生成完成，开始下载 ZIP…");
+          window.location.href = url;
+          setProgressText("完成 ✅（已触发下载）");
+        } else {
+          setProgressText("完成 ✅");
+        }
+      } else if (ev === "error") {
+        throw new Error(data?.message || "生成失败");
+      }
+    }
+  }
+}
+
+/** ---------------------------
+ * Render
+ * --------------------------*/
+
+function cardResult(item: SearchItem) {
+  const y = item.year ? ` (${item.year})` : "";
+  const t = escapeHtml(item.title + y);
+  const o = item.originalTitle ? `<div class="muted">${escapeHtml(item.originalTitle)}</div>` : "";
+  return `
+    <div class="result-item" data-id="${escapeHtml(item.id)}">
+      <div style="font-weight:700">${t}</div>
+      ${o}
+      <div class="muted">ID: ${escapeHtml(item.id)}</div>
+    </div>
+  `;
+}
+
+function renderSelected() {
+  const el = $("selected");
+  if (!state.selected) {
+    el.innerHTML = `<div class="muted">未选择</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-weight:800">${escapeHtml(state.selected.title)}${state.selected.year ? ` (${escapeHtml(state.selected.year)})` : ""}</div>
+    ${state.selected.originalTitle ? `<div class="muted">${escapeHtml(state.selected.originalTitle)}</div>` : ""}
+    <div class="muted">ID: ${escapeHtml(state.selected.id)}</div>
+  `;
+}
+
+function renderEpisodeGroups() {
+  const el = $("episodeGroups");
+  if (!state.episodeGroups.length) {
+    el.innerHTML = `<div class="muted">暂无剧集组（仅 TMDB TV 可用，点击“查剧集组”加载）</div>`;
+    return;
+  }
+
+  const items = state.episodeGroups
+    .map((g) => {
+      const active = g.id === state.episodeGroupId ? "active" : "";
+      return `
+      <div class="result-item ${active}" data-groupid="${escapeHtml(g.id)}">
+        <div style="font-weight:700">${escapeHtml(g.name)}</div>
+        ${g.description ? `<div class="muted">${escapeHtml(g.description)}</div>` : ""}
+        <div class="muted">ID: ${escapeHtml(g.id)}</div>
+      </div>
+    `;
+    })
+    .join("");
+
+  el.innerHTML = items;
+
+  // click bind
+  el.querySelectorAll("[data-groupid]").forEach((node) => {
+    node.addEventListener("click", () => {
+      state.episodeGroupId = (node as HTMLElement).dataset.groupid || "";
+      log(`已选择剧集组：${state.episodeGroupId}`);
+      renderEpisodeGroups();
+    });
+  });
+}
+
+function renderPreview(rows: any[]) {
+  const el = $("previewResults");
+  if (!rows?.length) {
+    el.innerHTML = `<div class="muted">暂无预览</div>`;
+    return;
+  }
+  el.innerHTML = rows
+    .map((r) => {
+      const parsed = r.parsed?.season && r.parsed?.episode ? `S${String(r.parsed.season).padStart(2, "0")}E${String(r.parsed.episode).padStart(2, "0")}` : "未解析";
+      return `
+      <div class="result-item">
+        <div style="font-weight:700">${escapeHtml(r.original || "")}</div>
+        <div class="muted">解析：${escapeHtml(parsed)}</div>
+        ${r.mediaPath ? `<div class="muted">媒体路径：${escapeHtml(r.mediaPath)}</div>` : ""}
+        ${Array.isArray(r.nfoPreview) ? `<div class="muted">NFO：${escapeHtml(r.nfoPreview.join(" , "))}</div>` : ""}
+      </div>
+    `;
+    })
+    .join("");
+}
+
+function render() {
+  // 赋值表单
+  ($("source") as HTMLSelectElement).value = state.source;
+  ($("mediaType") as HTMLSelectElement).value = state.mediaType;
+  ($("lang") as HTMLInputElement).value = state.lang;
+
+  ($("query") as HTMLInputElement).value = state.query;
+  ($("idInput") as HTMLInputElement).value = state.idInput;
+
+  ($("useAI") as HTMLInputElement).checked = state.useAI;
+
+  ($("m_title") as HTMLInputElement).value = state.manual.title;
+  ($("m_originalTitle") as HTMLInputElement).value = state.manual.originalTitle;
+  ($("m_year") as HTMLInputElement).value = state.manual.year;
+  ($("m_plot") as HTMLTextAreaElement).value = state.manual.plot;
+  ($("m_premiered") as HTMLInputElement).value = state.manual.premiered;
+  ($("m_rating") as HTMLInputElement).value = state.manual.rating;
+  ($("m_genres") as HTMLInputElement).value = state.manual.genres;
+  ($("m_studios") as HTMLInputElement).value = state.manual.studios;
+  ($("m_actors") as HTMLInputElement).value = state.manual.actors;
+
+  ($("s_seasons") as HTMLInputElement).value = String(state.manualStructure.seasons);
+  ($("s_epsPer") as HTMLInputElement).value = String(state.manualStructure.episodesPerSeason ?? "");
+  ($("s_map") as HTMLInputElement).value = state.manualStructure.seasonEpisodeMapText ?? "";
+  ($("s_epTitleTpl") as HTMLInputElement).value = state.manualStructure.episodeTitleTemplate ?? "";
+
+  ($("tvFormat") as HTMLTextAreaElement).value = state.rename.tvFormat;
+  ($("movieFormat") as HTMLTextAreaElement).value = state.rename.movieFormat;
+  ($("customization") as HTMLInputElement).value = state.rename.customization;
+  ($("originals") as HTMLTextAreaElement).value = state.rename.originalsText;
+  ($("nfoMode") as HTMLSelectElement).value = state.rename.nfoNameMode;
+
+  renderSelected();
+  renderEpisodeGroups();
+  renderStatus();
+  renderLogs();
+
+  // 根据 source 显示/隐藏某些区域
+  const manualBox = $("manualBox");
+  manualBox.style.display = state.source === "manual" ? "block" : "none";
+
+  const tmdbGroupBox = $("episodeGroupBox");
+  tmdbGroupBox.style.display = state.source === "tmdb" && state.mediaType === "tv" ? "block" : "none";
+}
+
+/** ---------------------------
+ * Bind events
+ * --------------------------*/
+
+function bind() {
+  // 基本选择
+  $("source").addEventListener("change", (e) => {
+    state.source = (e.target as HTMLSelectElement).value as SourceType;
+    state.selected = null;
+    state.episodeGroups = [];
+    state.episodeGroupId = "";
+    render();
+  });
+
+  $("mediaType").addEventListener("change", (e) => {
+    state.mediaType = (e.target as HTMLSelectElement).value as MediaType;
+    state.selected = null;
+    state.episodeGroups = [];
+    state.episodeGroupId = "";
+    render();
+  });
+
+  $("lang").addEventListener("change", (e) => {
+    state.lang = (e.target as HTMLInputElement).value;
+  });
+
+  $("query").addEventListener("input", (e) => (state.query = (e.target as HTMLInputElement).value));
+  $("idInput").addEventListener("input", (e) => (state.idInput = (e.target as HTMLInputElement).value));
+  $("useAI").addEventListener("change", (e) => (state.useAI = (e.target as HTMLInputElement).checked));
+
+  // manual
+  $("m_title").addEventListener("input", (e) => (state.manual.title = (e.target as HTMLInputElement).value));
+  $("m_originalTitle").addEventListener("input", (e) => (state.manual.originalTitle = (e.target as HTMLInputElement).value));
+  $("m_year").addEventListener("input", (e) => (state.manual.year = (e.target as HTMLInputElement).value));
+  $("m_plot").addEventListener("input", (e) => (state.manual.plot = (e.target as HTMLTextAreaElement).value));
+  $("m_premiered").addEventListener("input", (e) => (state.manual.premiered = (e.target as HTMLInputElement).value));
+  $("m_rating").addEventListener("input", (e) => (state.manual.rating = (e.target as HTMLInputElement).value));
+  $("m_genres").addEventListener("input", (e) => (state.manual.genres = (e.target as HTMLInputElement).value));
+  $("m_studios").addEventListener("input", (e) => (state.manual.studios = (e.target as HTMLInputElement).value));
+  $("m_actors").addEventListener("input", (e) => (state.manual.actors = (e.target as HTMLInputElement).value));
+
+  // structure
+  $("s_seasons").addEventListener("input", (e) => (state.manualStructure.seasons = Number((e.target as HTMLInputElement).value || 1)));
+  $("s_epsPer").addEventListener(
+    "input",
+    (e) => (state.manualStructure.episodesPerSeason = Number((e.target as HTMLInputElement).value || 1))
+  );
+  $("s_map").addEventListener("input", (e) => (state.manualStructure.seasonEpisodeMapText = (e.target as HTMLInputElement).value));
+  $("s_epTitleTpl").addEventListener(
+    "input",
+    (e) => (state.manualStructure.episodeTitleTemplate = (e.target as HTMLInputElement).value)
+  );
+
+  // rename
+  $("tvFormat").addEventListener("input", (e) => (state.rename.tvFormat = (e.target as HTMLTextAreaElement).value));
+  $("movieFormat").addEventListener("input", (e) => (state.rename.movieFormat = (e.target as HTMLTextAreaElement).value));
+  $("customization").addEventListener("input", (e) => (state.rename.customization = (e.target as HTMLInputElement).value));
+  $("originals").addEventListener("input", (e) => (state.rename.originalsText = (e.target as HTMLTextAreaElement).value));
+  $("nfoMode").addEventListener("change", (e) => (state.rename.nfoNameMode = (e.target as HTMLSelectElement).value as NfoNameMode));
+
+  // 搜索
+  $("btnSearch").addEventListener("click", async () => {
+    try {
+      setBusy(true, "搜索中…");
+      log("开始搜索…");
+
+      const items = await apiSearch();
+      const box = $("results");
+      if (!items.length) {
+        box.innerHTML = `<div class="muted">没有搜索结果</div>`;
+        state.selected = null;
+        renderSelected();
+        setBusy(false, "搜索完成（无结果）");
+        return;
+      }
+
+      box.innerHTML = items.map(cardResult).join("");
+      box.querySelectorAll("[data-id]").forEach((node) => {
+        node.addEventListener("click", () => {
+          const id = (node as HTMLElement).dataset.id || "";
+          const hit = items.find((x) => x.id === id) || null;
+          state.selected = hit;
+          state.episodeGroups = [];
+          state.episodeGroupId = "";
+          log(`已选择：${hit?.title || id}`);
+          renderSelected();
+          renderEpisodeGroups();
+        });
+      });
+
+      setBusy(false, `搜索完成：${items.length} 条`);
+      log(`搜索完成：${items.length} 条`);
+    } catch (e: any) {
+      setBusy(false, "搜索失败");
+      log(`搜索失败：${e?.message || String(e)}`);
+    }
+  });
+
+  // 查剧集组
+  $("btnEpisodeGroups").addEventListener("click", async () => {
+    try {
+      setBusy(true, "加载剧集组…");
+      const groups = await apiEpisodeGroups();
+      state.episodeGroups = groups;
+      state.episodeGroupId = groups[0]?.id || "";
+      renderEpisodeGroups();
+      setBusy(false, `剧集组：${groups.length} 个`);
+      log(`加载剧集组完成：${groups.length} 个`);
+    } catch (e: any) {
+      setBusy(false, "加载剧集组失败");
+      log(`加载剧集组失败：${e?.message || String(e)}`);
+    }
+  });
+
+  // 预览
+  $("btnPreview").addEventListener("click", async () => {
+    try {
+      setBusy(true, "生成预览…");
+      log("开始生成预览（前50行）…");
+      const data = await apiPreview();
+      renderPreview(data.rows || []);
+      setBusy(false, "预览完成 ✅");
+      log("预览完成 ✅");
+    } catch (e: any) {
+      setBusy(false, "预览失败");
+      log(`预览失败：${e?.message || String(e)}`);
+    }
+  });
+
+  // 一键生成并下载
+  $("btnGenerate").addEventListener("click", async () => {
+    try {
+      // 基本校验
+      if (state.source !== "manual") {
+        const id = state.selected?.id || (state.idInput || "").trim();
+        if (!id) {
+          log("请先搜索并选择一个条目，或直接输入 ID。");
+          return;
+        }
+      }
+
+      setBusy(true, "开始生成…");
+      log("开始生成并打包…");
+
+      await startGenerateAndDownload();
+
+      setBusy(false, "完成 ✅");
+    } catch (e: any) {
+      setBusy(false, "生成失败");
+      log(`生成失败：${e?.message || String(e)}`);
+    }
+  });
+}
+
+/** ---------------------------
+ * Mount
+ * --------------------------*/
+
+function injectSkeleton() {
+  // 这里生成基础 DOM（你若已有 index.html 模板，也可以只保留 render/bind）
+  const root = document.getElementById("app");
+  if (!root) throw new Error("Missing #app");
+
+  root.innerHTML = `
+  <div class="page">
+    <div class="header">
+      <div class="title">🎬 Emby Meta Tool</div>
+      <div class="sub">元数据生成 / 重命名预览 / 同名 NFO（支持）</div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">1) 数据源与搜索</div>
+
+        <div class="row">
+          <label class="label">数据源</label>
+          <select id="source" class="input">
+            <option value="tmdb">TMDB</option>
+            <option value="bangumi">Bangumi</option>
+            <option value="anidb">AniDB</option>
+            <option value="manual">手动</option>
+          </select>
+
+          <label class="label">类型</label>
+          <select id="mediaType" class="input">
+            <option value="tv">剧集</option>
+            <option value="movie">电影</option>
+            <option value="anime">动漫</option>
+          </select>
+
+          <label class="label">语言</label>
+          <input id="lang" class="input" value="zh-CN" />
+        </div>
+
+        <div class="row">
+          <input id="query" class="input flex" placeholder="标题关键词（可空）" />
+          <input id="idInput" class="input" style="width:220px" placeholder="或直接输入 ID" />
+          <button id="btnSearch" class="btn">搜索</button>
+        </div>
+
+        <div class="split">
+          <div>
+            <div class="muted">搜索结果</div>
+            <div id="results" class="results"><div class="muted">（搜索后显示）</div></div>
+          </div>
+          <div>
+            <div class="muted">已选择</div>
+            <div id="selected" class="results"><div class="muted">未选择</div></div>
+          </div>
+        </div>
+
+        <div id="episodeGroupBox" style="margin-top:12px;">
+          <div class="card-title">2) TMDB 剧集组（可选）</div>
+          <div class="row">
+            <button id="btnEpisodeGroups" class="btn">查剧集组</button>
+            <div class="muted">选择一个剧集组后生成会以该顺序/结构输出</div>
+          </div>
+          <div id="episodeGroups" class="results"><div class="muted">暂无剧集组</div></div>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <label class="checkbox">
+            <input id="useAI" type="checkbox" />
+            <span>AI 自动补全缺失字段（可选）</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">3) 手动元数据（manual 模式）</div>
+        <div id="manualBox">
+          <div class="row">
+            <input id="m_title" class="input flex" placeholder="标题（必填）" />
+            <input id="m_originalTitle" class="input flex" placeholder="原名（可选）" />
+            <input id="m_year" class="input" style="width:120px" placeholder="年份" />
+          </div>
+
+          <div class="row">
+            <input id="m_premiered" class="input" style="width:220px" placeholder="首播日期 YYYY-MM-DD" />
+            <input id="m_rating" class="input" style="width:120px" placeholder="评分" />
+            <input id="m_genres" class="input flex" placeholder="类型（逗号分隔）" />
+          </div>
+
+          <div class="row">
+            <input id="m_studios" class="input flex" placeholder="制片公司（逗号分隔）" />
+            <input id="m_actors" class="input flex" placeholder="演员（逗号分隔）" />
+          </div>
+
+          <textarea id="m_plot" class="textarea" rows="4" placeholder="简介（可选）"></textarea>
+
+          <div class="card-title" style="margin-top:12px;">季 / 集结构</div>
+          <div class="row">
+            <input id="s_seasons" class="input" style="width:120px" placeholder="总季数" />
+            <input id="s_epsPer" class="input" style="width:140px" placeholder="每季集数" />
+            <input id="s_map" class="input flex" placeholder="每季集数映射：1:12,2:10（可选）" />
+          </div>
+          <div class="row">
+            <input id="s_epTitleTpl" class="input flex" placeholder="集标题模板（可选）如 Episode {{ episode }}" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">4) 重命名 & 同名 NFO</div>
+
+        <div class="row">
+          <label class="label" style="min-width:120px;">NFO 命名模式</label>
+          <select id="nfoMode" class="input" style="width:260px;">
+            <option value="both" selected>both（标准+同名，推荐）</option>
+            <option value="standard">standard（仅 SxxEyy.nfo）</option>
+            <option value="same_as_media">same_as_media（仅 同名.nfo）</option>
+          </select>
+
+          <button id="btnPreview" class="btn">预览命名</button>
+        </div>
+
+        <div class="muted" style="margin:8px 0 6px;">
+          原始文件名列表（每行一个）。用于：重命名映射 + 同名 NFO 生成 + 预览。
+        </div>
+        <textarea id="originals" class="textarea" rows="6" placeholder="lolihouse 2.5次元的诱惑 - S01E01 - 第 1 集 - 1080p.mkv"></textarea>
+
+        <div class="row">
+          <input id="customization" class="input flex" placeholder="customization（可选，模板可用 {{ customization }}）" />
+        </div>
+
+        <div class="muted" style="margin:10px 0 6px;">TV 模板</div>
+        <textarea id="tvFormat" class="textarea" rows="3"></textarea>
+
+        <div class="muted" style="margin:10px 0 6px;">Movie 模板</div>
+        <textarea id="movieFormat" class="textarea" rows="3"></textarea>
+
+        <div class="muted" style="margin:10px 0 6px;">预览结果（前 50 行）</div>
+        <div id="previewResults" class="results"><div class="muted">暂无预览</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">5) 一键生成并下载</div>
+        <div class="row">
+          <button id="btnGenerate" class="btn primary">生成并打包下载</button>
+          <div class="muted">点一次即可（会显示进度并自动触发 ZIP 下载）</div>
+        </div>
+        <div class="muted" style="margin:10px 0 6px;">日志</div>
+        <pre id="logs" class="logs"></pre>
+      </div>
+    </div>
+  </div>
+  `;
+
+  // 注入一套轻量 CSS（Material v3 风格接近）
+  const style = document.createElement("style");
+  style.textContent = `
+  .page{max-width:1100px;margin:18px auto;padding:0 14px;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;}
+  .header{margin-bottom:14px;}
+  .title{font-size:22px;font-weight:900;}
+  .sub{color:#666;margin-top:4px;}
+  .status{margin-top:10px;color:#444;font-weight:700;}
+  .grid{display:grid;grid-template-columns:1fr;gap:12px;}
+  @media(min-width:980px){.grid{grid-template-columns:1fr 1fr;}}
+  .card{border:1px solid rgba(0,0,0,.12);border-radius:16px;padding:14px;background:#fff;box-shadow:0 1px 0 rgba(0,0,0,.04);}
+  .card-title{font-weight:900;margin-bottom:10px;}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0;}
+  .split{display:grid;grid-template-columns:1fr;gap:10px;margin-top:10px;}
+  @media(min-width:700px){.split{grid-template-columns:1fr 1fr;}}
+  .label{color:#666;font-size:12px;}
+  .muted{color:#777;font-size:12px;}
+  .input{border:1px solid rgba(0,0,0,.18);border-radius:12px;padding:10px 12px;font-size:14px;background:#fff;outline:none;}
+  .input:focus{border-color:rgba(0,0,0,.35);}
+  .textarea{width:100%;border:1px solid rgba(0,0,0,.18);border-radius:12px;padding:10px 12px;font-size:14px;outline:none;resize:vertical;}
+  .textarea:focus{border-color:rgba(0,0,0,.35);}
+  .btn{border:1px solid rgba(0,0,0,.18);border-radius:999px;padding:10px 14px;background:#fff;font-weight:800;cursor:pointer;}
+  .btn:hover{background:rgba(0,0,0,.03);}
+  .btn.primary{background:#1f6feb;color:#fff;border-color:#1f6feb;}
+  .btn.primary:hover{filter:brightness(.95);}
+  .flex{flex:1;min-width:220px;}
+  .results{border:1px dashed rgba(0,0,0,.18);border-radius:14px;padding:10px;min-height:70px;background:rgba(0,0,0,.015);}
+  .result-item{border:1px solid rgba(0,0,0,.10);border-radius:12px;padding:10px;margin:8px 0;background:#fff;cursor:pointer;}
+  .result-item.active{border-color:#1f6feb;background:rgba(31,111,235,.06);}
+  .logs{white-space:pre-wrap;word-break:break-word;border:1px solid rgba(0,0,0,.18);border-radius:12px;padding:10px;background:rgba(0,0,0,.03);min-height:120px;max-height:360px;overflow:auto;}
+  .checkbox{display:flex;gap:10px;align-items:center;cursor:pointer;}
+  `;
+  document.head.appendChild(style);
+}
+
+export function mountUI() {
+  injectSkeleton();
+  bind();
+  render();
+  log("UI 已加载。");
 }
