@@ -78,3 +78,8 @@ body {
   font-size: 12px;
   line-height: 1.35;
 }
+
+md-filled-text-field[type="textarea"] {
+  width: 100%;
+}
+
