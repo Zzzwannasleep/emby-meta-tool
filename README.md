@@ -139,7 +139,7 @@ Show Name (Year)/
 
 1. 注册 / 登录 https://www.themoviedb.org
 2. 进入账号设置 → API
-3. 创建 API Key（v4 Token 或 v3 Key 均可）
+3. 创建 API Key（v4 Token（短的那条））
 
 #### Cloudflare Pages 配置
 
