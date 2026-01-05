@@ -95,6 +95,96 @@ Show Name (Year)/
 
 ---
 
+## 🔑 API Key & 环境变量配置（非常重要）
+
+本项目部分数据源需要 API Key 才能正常工作，请在 Cloudflare Pages 中正确配置。
+
+### ✅ TMDB（必需）
+
+本工具使用 **官方 TMDB API**，必须提供 API Key。
+
+#### 获取方式
+
+1. 注册 / 登录 https://www.themoviedb.org
+2. 进入账号设置 → API
+3. 创建 API Key（v4 Token 或 v3 Key 均可）
+
+#### Cloudflare Pages 配置
+
+在 **Pages → Settings → Environment Variables** 中添加：
+
+| 名称 | 值 |
+|----|----|
+| `TMDB_API_KEY` | 你的 TMDB API Key |
+
+> 建议添加到 **Production** 和 **Preview** 环境
+
+#### 未配置会发生什么？
+
+- TMDB 搜索失败
+- 剧集组（Episode Groups）无法加载
+- 图片下载失败
+- 页面只会提示“检索失败”
+
+### ℹ️ AniDB（当前版本不需要 Client ID）
+
+> ⚠️ 重要说明
+
+当前版本 **未直接使用官方 AniDB UDP API**，而是采用：
+- 公共索引数据
+- + 手动填写 / AI 补全兜底
+
+因此：
+
+- ❌ **不需要 AniDB clientId**
+- ❌ 不需要 client name / version
+- ✅ 可直接使用
+
+> 后续如果改为 **官方 AniDB API 模式**，才会引入 clientId / 限速 / 登录等配置。
+
+### ℹ️ Bangumi
+
+- 使用 Bangumi 公共 API
+- 当前版本 **不强制要求 Access Token**
+- 可能存在公共速率限制，但对一般使用足够
+
+---
+
+### 🤖 AI 自动补全（可选）
+
+若启用 AI 自动补全功能，需要配置 AI 接口。
+
+#### 示例（OpenAI / 兼容接口）
+
+| 名称 | 说明 |
+|----|----|
+| `AI_API_KEY` | API Key |
+| `AI_API_BASE` | API Base URL（可选） |
+| `AI_MODEL` | 模型名（如 gpt-4o-mini） |
+
+> 未配置 AI 不影响其他功能。
+
+---
+
+### 📦 Cloudflare Bindings（再次确认）
+
+以下绑定 **必须存在**，否则生成阶段会失败：
+
+#### R2 Bucket
+| 变量名 | 说明 |
+|----|----|
+| `META_BUCKET` | 存放生成的 ZIP 文件 |
+
+#### KV Namespace
+| 变量名 | 说明 |
+|----|----|
+| `META_KV` | 缓存 / 索引数据 |
+
+⚠️ **Production 环境也必须配置**
+
+---
+
+
 ## 🧪 使用指南
 
 ### 1️⃣ 普通刮削（推荐）
