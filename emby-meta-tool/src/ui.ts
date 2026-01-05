@@ -346,8 +346,6 @@ async function apiPreview() {
 }
 
 function buildGeneratePayload() {
-  const series = getSeriesForRequest();
-
   // 后端 generate.ts 预期字段（你现在 generate.ts 如果名字不同，改这里）
   const payload: any = {
     source: state.source,
@@ -445,9 +443,7 @@ async function startGenerateAndDownload() {
       const data = dataLine ? JSON.parse(dataLine) : {};
 
       if (ev === "progress") {
-        const msg = data?.message
-          ? `${data.step || "处理中"}：${data.message}`
-          : `${data.step || "处理中"}…`;
+        const msg = data?.message ? `${data.step || "处理中"}：${data.message}` : `${data.step || "处理中"}…`;
         setProgressText(msg);
       } else if (ev === "done") {
         const url = data?.downloadUrl;
@@ -535,7 +531,10 @@ function renderPreview(rows: any[]) {
   }
   el.innerHTML = rows
     .map((r) => {
-      const parsed = r.parsed?.season && r.parsed?.episode ? `S${String(r.parsed.season).padStart(2, "0")}E${String(r.parsed.episode).padStart(2, "0")}` : "未解析";
+      const parsed =
+        r.parsed?.season && r.parsed?.episode
+          ? `S${String(r.parsed.season).padStart(2, "0")}E${String(r.parsed.episode).padStart(2, "0")}`
+          : "未解析";
       return `
       <div class="result-item">
         <div style="font-weight:700">${escapeHtml(r.original || "")}</div>
@@ -636,15 +635,9 @@ function bind() {
 
   // structure
   $("s_seasons").addEventListener("input", (e) => (state.manualStructure.seasons = Number((e.target as HTMLInputElement).value || 1)));
-  $("s_epsPer").addEventListener(
-    "input",
-    (e) => (state.manualStructure.episodesPerSeason = Number((e.target as HTMLInputElement).value || 1))
-  );
+  $("s_epsPer").addEventListener("input", (e) => (state.manualStructure.episodesPerSeason = Number((e.target as HTMLInputElement).value || 1)));
   $("s_map").addEventListener("input", (e) => (state.manualStructure.seasonEpisodeMapText = (e.target as HTMLInputElement).value));
-  $("s_epTitleTpl").addEventListener(
-    "input",
-    (e) => (state.manualStructure.episodeTitleTemplate = (e.target as HTMLInputElement).value)
-  );
+  $("s_epTitleTpl").addEventListener("input", (e) => (state.manualStructure.episodeTitleTemplate = (e.target as HTMLInputElement).value));
 
   // rename
   $("tvFormat").addEventListener("input", (e) => (state.rename.tvFormat = (e.target as HTMLTextAreaElement).value));
@@ -756,6 +749,7 @@ function injectSkeleton() {
   const root = document.getElementById("app");
   if (!root) throw new Error("Missing #app");
 
+  // ✅ 这里：在 .page 外追加 footer（确保在页面底部）
   root.innerHTML = `
   <div class="page">
     <div class="header">
@@ -900,6 +894,18 @@ function injectSkeleton() {
       </div>
     </div>
   </div>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span class="footer-title">🎬 Emby Meta Tool</span>
+      <span class="footer-sep">·</span>
+      <a class="footer-link" href="https://github.com/Zzzwannasleep/emby-meta-tool" target="_blank" rel="noopener noreferrer">
+        GitHub
+      </a>
+      <span class="footer-sep">·</span>
+      <span class="footer-muted">https://github.com/Zzzwannasleep/emby-meta-tool</span>
+    </div>
+  </footer>
   `;
 
   // 注入一套轻量 CSS（Material v3 风格接近）
@@ -933,6 +939,33 @@ function injectSkeleton() {
   .result-item.active{border-color:#1f6feb;background:rgba(31,111,235,.06);}
   .logs{white-space:pre-wrap;word-break:break-word;border:1px solid rgba(0,0,0,.18);border-radius:12px;padding:10px;background:rgba(0,0,0,.03);min-height:120px;max-height:360px;overflow:auto;}
   .checkbox{display:flex;gap:10px;align-items:center;cursor:pointer;}
+
+  /* ✅ Footer（项目地址） */
+  .footer{
+    max-width:1100px;
+    margin:40px auto 20px;
+    padding:16px 14px 0;
+    border-top:1px dashed rgba(0,0,0,.15);
+    text-align:center;
+  }
+  .footer-inner{
+    font-size:13px;
+    color:#666;
+    display:flex;
+    gap:8px;
+    justify-content:center;
+    align-items:center;
+    flex-wrap:wrap;
+  }
+  .footer-title{font-weight:900;}
+  .footer-link{
+    color:#1f6feb;
+    text-decoration:none;
+    font-weight:800;
+  }
+  .footer-link:hover{ text-decoration:underline; }
+  .footer-sep{color:#999;}
+  .footer-muted{color:#888; word-break:break-all;}
   `;
   document.head.appendChild(style);
 }
