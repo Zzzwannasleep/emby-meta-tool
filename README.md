@@ -279,10 +279,7 @@ A：目录结构与 Jellyfin 高度兼容，理论可用。
 * UI / UX 优化
 * 文档补充
 
----
-
 ## 📄 License
 
 MIT License
 
-```
