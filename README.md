@@ -1,5 +1,12 @@
 # 🎬 Emby Meta Tool
 
+[![Cloudflare Pages](https://img.shields.io/badge/Deploy-Cloudflare%20Pages-F38020?logo=cloudflare&logoColor=white)](https://pages.cloudflare.com/)
+![No CLI Required](https://img.shields.io/badge/No-CLI%20Required-success)
+![Web App](https://img.shields.io/badge/Web-App-blue)
+![Emby](https://img.shields.io/badge/Emby-Metadata%20Ready-52B54B)
+![Jellyfin](https://img.shields.io/badge/Jellyfin-Compatible-00A4DC)
+![License](https://img.shields.io/github/license/Zzzwannasleep/emby-meta-tool)
+
 一款 **完全基于 Cloudflare Pages + Workers + KV + R2 的网页端 Emby 元数据生成工具**。  
 支持 **TMDB / Bangumi / AniDB / 纯手动模式**，可生成 **Emby 可识别的 NFO + 图片结构**，并支持 **MoviePilot 风格的文件重命名映射**。
 
@@ -20,6 +27,8 @@
 - ✅ 生成 **标准 Emby 元数据目录结构**
 - ✅ MoviePilot 风格重命名（生成 rename 映射文件）
 - ✅ 自动解析原始文件名中的 SxxEyy / 1x02 / 第X集
+- ✅ 支持生成 **标准 SxxEyy.nfo**
+- ✅ 可选生成 **与媒体文件同名的 NFO（双写模式，更方便整理库）**
 
 ---
 
@@ -54,44 +63,67 @@ Show Name (Year)/
 
 ## 🚀 在线部署（Cloudflare Pages）
 
+> 本项目为 **Cloudflare Pages + Pages Functions** 架构  
+> Cloudflare 官方目前 **不支持 Pages 的真正“一键 Deploy 按钮”**（仅 Workers 支持）  
+> 但按以下步骤，**2~3 分钟即可完成完整部署**
+
+### 👉 快速入口
+
+[![Deploy to Cloudflare Pages](https://img.shields.io/badge/Deploy-Cloudflare%20Pages-F38020?logo=cloudflare&logoColor=white)](https://dash.cloudflare.com/)
+
+---
+
 ### 前置条件
 
 - GitHub 账号
 - Cloudflare 账号
-- Cloudflare R2 Bucket
-- Cloudflare KV Namespace
+- Cloudflare R2 Bucket（用于存放生成的 ZIP）
+- Cloudflare KV Namespace（用于缓存 / 索引）
 
 ---
 
-### 部署步骤（纯网页端）
+### 部署步骤（纯网页端，无 CLI）
 
-1. Fork 或 Clone 本仓库
-2. Cloudflare Dashboard → Pages → Create Project
-3. 选择该 GitHub 仓库
-4. 构建设置：
-   - **Root directory**：`emby-meta-tool`
-   - **Build command**：`npm run build`
-   - **Output directory**：`dist`
+1. Fork 本仓库到你自己的 GitHub
+2. 打开 Cloudflare Dashboard → **Pages** → **Create a project**
+3. 选择你 Fork 的仓库
+4. 填写构建参数：
+
+   | 项目 | 值 |
+   |---|---|
+   | Root directory | `emby-meta-tool` |
+   | Build command | `npm run build` |
+   | Output directory | `dist` |
+
+5. 点击 **Deploy**
 
 ---
 
 ### 必须的 Bindings（非常重要）
 
-在 Pages → Settings → **Bindings** 中配置：
+在 Pages → **Settings → Bindings** 中配置以下内容：
 
-#### R2 Bucket
-| 类型 | 名称 |
-|----|----|
+#### R2 Bucket（必需）
+| 类型 | 值 |
+|---|---|
 | Variable name | `META_BUCKET` |
 | Bucket | 你创建的 R2 Bucket |
 
-#### KV Namespace
-| 类型 | 名称 |
-|----|----|
+#### KV Namespace（必需）
+| 类型 | 值 |
+|---|---|
 | Variable name | `META_KV` |
 | Namespace | 你创建的 KV |
 
-> ⚠️ **请确保 Production 环境也配置了以上绑定**
+> ⚠️ **Production 环境必须配置，否则生成阶段会直接失败**
+
+---
+
+### 部署完成后
+
+- 打开 Pages 提供的访问地址
+- 所有功能 **直接在网页端完成**
+- 无需 wrangler / 无需本地 Node / 无需 CLI
 
 ---
 
@@ -260,6 +292,12 @@ Episode {{ episode }}
 
 ## 🪄 重命名功能（MoviePilot 风格）
 
+### NFO 命名模式（可选）
+
+- `standard`：仅生成 `S01E01.nfo`（最稳，Emby 官方推荐）
+- `same_as_media`：仅生成与媒体文件同名的 `.nfo`
+- `both`（默认）：**两种同时生成（推荐）**
+
 ### 输入内容
 
 在「原始文件名列表」中粘贴：
@@ -348,9 +386,11 @@ emby-meta-tool/
 
 A：浏览器无法安全访问本地媒体文件，本工具生成 **映射表**，由 MoviePilot / 批量重命名工具执行。
 
-### Q：为什么 NFO 名称不能自定义？
+### Q：NFO 文件名能完全自定义吗？
 
-A：Emby 对元数据文件名有严格规范，错误命名将无法识别。
+A：不能完全自定义。  
+Emby 对元数据文件名有硬性规范（如 `tvshow.nfo / season.nfo / SxxEyy.nfo`），
+本工具在保证兼容性的前提下，**支持额外生成与媒体文件同名的 NFO（双写模式）**。
 
 ### Q：可以支持 Jellyfin 吗？
 
