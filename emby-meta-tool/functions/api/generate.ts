@@ -11,7 +11,7 @@ import {
 } from "../../shared/emby";
 import { downloadImagesToMap, tmdbGetDetails, tmdbGetEpisodeGroup, tmdbGetTvSeason } from "../../shared/tmdb";
 import { bangumiGetEpisodes, bangumiGetSubject } from "../../shared/bangumi";
-import { renderRenameTemplate, sanitizePathLike, seasonEpisode, splitExt } from "../../shared/rename";
+import { renderRenameTemplate, sanitizePathLike, seasonEpisode, splitExt, parseSeasonEpisodeFromName } from "../../shared/rename";
 
 export const onRequest = async (context: any) => {
   const env = context.env as Env;
@@ -394,3 +394,4 @@ function csvEscape(s: string) {
   if (/[,"\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
   return v;
 }
+
