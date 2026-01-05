@@ -1,4 +1,4 @@
 import "./styles.css";
-import { renderApp } from "./ui";
+import { mountUI } from "./ui";
 
-renderApp(document.getElementById("app")!);
+mountUI();
