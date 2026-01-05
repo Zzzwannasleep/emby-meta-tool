@@ -11,6 +11,7 @@ import {
 } from "../../shared/emby";
 import { downloadImagesToMap, tmdbGetDetails, tmdbGetEpisodeGroup, tmdbGetTvSeason } from "../../shared/tmdb";
 import { bangumiGetEpisodes, bangumiGetSubject } from "../../shared/bangumi";
+import { renderRenameTemplate, sanitizePathLike, seasonEpisode, splitExt } from "../../shared/rename";
 
 export const onRequest = async (context: any) => {
   const env = context.env as Env;
@@ -22,7 +23,7 @@ export const onRequest = async (context: any) => {
   const req = await context.request.json<any>().catch(() => null);
   if (!req) return new Response("Bad JSON", { status: 400 });
 
-  const source = (req.source || "tmdb") as "tmdb" | "bangumi" | "anidb";
+  const source = (req.source || "tmdb") as "tmdb" | "bangumi" | "anidb" | "manual";
   const mediaType = (req.mediaType || "tv") as "tv" | "movie" | "anime";
   const lang = (req.lang || "zh-CN") as string;
   const id = (req.id || null) as string | null;
@@ -30,21 +31,32 @@ export const onRequest = async (context: any) => {
   const useAI = !!req.useAI;
   const manual = req.manual || {};
 
+  // ✅ 新增：手动季集结构
+  const manualStructure = req.manualStructure || null as null | {
+    seasons: number;                  // 总季数
+    episodesPerSeason?: number;       // 每季统一多少集
+    seasonEpisodeMap?: Record<string, number>; // {"1":12,"2":10}
+    episodeTitleTemplate?: string;    // "Episode {{ episode }}" 或 "{{ season_episode }} ..."
+  };
+
+  // ✅ 新增：重命名配置
+  const rename = req.rename || null as null | {
+    tvFormat?: string;
+    movieFormat?: string;
+    customization?: string;
+    // 原始文件名列表：一行一个
+    originals?: string[];
+  };
+
   const stream = new ReadableStream({
     start: async (controller) => {
-      const send = (event: string, data: any) => {
-        controller.enqueue(encodeSSE(event, data));
-      };
-
-      const fail = (message: string) => {
-        send("error", { message });
-        controller.close();
-      };
+      const send = (event: string, data: any) => controller.enqueue(encodeSSE(event, data));
+      const fail = (message: string) => { send("error", { message }); controller.close(); };
 
       try {
         send("progress", { step: "初始化", current: 0, total: 0, message: "准备开始…" });
 
-        // 1) 拉取/构造基础元数据
+        // 1) 构造基础元数据（series/seasons/episodes）
         let series: any = {
           title: manual.title || "",
           originalTitle: manual.originalTitle || "",
@@ -62,6 +74,7 @@ export const onRequest = async (context: any) => {
         let episodes: Array<{ seasonNumber: number; episodeNumber: number; title: string; plot?: string; aired?: string }> = [];
         let imageQueue: Array<{ key: string; url: string }> = [];
 
+        // --- 数据源抓取 ---
         if (source === "tmdb") {
           if (!id) throw new Error("TMDB 必须提供 ID（TV/Movie ID）或先检索选择。");
           const tm = mediaType === "movie" ? "movie" : "tv";
@@ -69,7 +82,6 @@ export const onRequest = async (context: any) => {
 
           const detail = await tmdbGetDetails(env, tm, id, lang);
 
-          // series info
           series.title = series.title || detail.name || detail.title || "";
           series.originalTitle = series.originalTitle || detail.original_name || detail.original_title || "";
           series.year = series.year || (detail.first_air_date || detail.release_date || "").slice(0, 4) || "";
@@ -84,29 +96,22 @@ export const onRequest = async (context: any) => {
             imdb: ids.imdb_id ? String(ids.imdb_id) : undefined
           };
 
-          // genres / studios / actors
           series.genres = (series.genres?.length ? series.genres : (detail.genres || []).map((g: any) => g.name)).filter(Boolean);
           series.studios = (series.studios?.length ? series.studios : (detail.networks || detail.production_companies || []).map((x: any) => x.name)).filter(Boolean);
+
           if (!series.actors?.length) {
             const cast = detail.credits?.cast || [];
             series.actors = cast.slice(0, 20).map((c: any) => c.name).filter(Boolean);
           }
 
-          // images (poster/fanart/landscape)
           if (detail.poster_path) imageQueue.push({ key: "poster.jpg", url: `https://image.tmdb.org/t/p/original${detail.poster_path}` });
           const backdrops = (detail.images?.backdrops || []).slice(0, 1);
           if (backdrops[0]?.file_path) imageQueue.push({ key: "fanart.jpg", url: `https://image.tmdb.org/t/p/original${backdrops[0].file_path}` });
-          const posters = (detail.images?.posters || []).slice(0, 1);
-          if (!detail.poster_path && posters[0]?.file_path) imageQueue.push({ key: "poster.jpg", url: `https://image.tmdb.org/t/p/original${posters[0].file_path}` });
 
-          // TV episodes / seasons
           if (tm === "tv") {
             if (episodeGroupId) {
               send("progress", { step: "拉取剧集组", current: 0, total: 0, message: `TMDB episode_group ${episodeGroupId}` });
               const g = await tmdbGetEpisodeGroup(env, episodeGroupId, lang);
-
-              // group 的结构：groups[] => episodes[] 映射到 season/episode
-              // 这里按 group 的顺序重新编号：第1组为 Season 1，第2组为 Season 2...
               const groups = g?.groups || [];
               let seasonNo = 1;
               for (const sg of groups) {
@@ -126,12 +131,9 @@ export const onRequest = async (context: any) => {
                 }
                 seasonNo++;
               }
-              if (!episodes.length) {
-                send("progress", { step: "提示", current: 0, total: 0, message: "该剧集组未返回可用分组/集信息，将回退到默认季集。" });
-              }
             }
 
-            // 回退：按默认 season/episode
+            // 回退：默认季集
             if (!episodes.length) {
               const seasonList = (detail.seasons || []).filter((s: any) => typeof s.season_number === "number" && s.season_number >= 0);
               send("progress", { step: "拉取季信息", current: 0, total: seasonList.length, message: `共 ${seasonList.length} 季（默认季集）` });
@@ -169,14 +171,11 @@ export const onRequest = async (context: any) => {
           series.uniqueIds = { ...(series.uniqueIds || {}), bangumi: String(sub.id) };
           if (sub.images?.large) imageQueue.push({ key: "poster.jpg", url: sub.images.large });
 
-          // episodes
           send("progress", { step: "拉取 Bangumi 章节", current: 0, total: 0, message: `Bangumi /subject/${id}/ep` });
           const eps = await bangumiGetEpisodes(env, id);
           const list = eps?.data || eps?.eps || [];
-          // Bangumi eps: sort by sort
           const normal = list.filter((x: any) => x.type === 0 || x.type === 1).sort((a: any, b: any) => (a.sort ?? 0) - (b.sort ?? 0));
 
-          // Bangumi 不天然有 season，这里按 Emby TV 结构输出：统一 Season 1
           seasons = [{ seasonNumber: 1, title: "Season 1", plot: "" }];
           episodes = normal.map((e: any, idx: number) => ({
             seasonNumber: 1,
@@ -189,18 +188,44 @@ export const onRequest = async (context: any) => {
 
         if (source === "anidb") {
           if (!id) throw new Error("AniDB 必须提供 AID 或先用索引检索选中。");
-          // AniDB 这里不强行拉取 TCP API（复杂且限制多），以“手工/AI补全 + AID 写入 uniqueid”为主
           send("progress", { step: "AniDB 处理", current: 0, total: 0, message: `AniDB AID=${id}（建议配合手工填写或AI补全）` });
           series.uniqueIds = { ...(series.uniqueIds || {}), anidb: String(id) };
 
-          // 默认按单季输出（你也可以手动改/AI补全）
           if (!seasons.length) seasons = [{ seasonNumber: 1, title: "Season 1", plot: "" }];
-          if (!episodes.length) {
-            episodes = [{ seasonNumber: 1, episodeNumber: 1, title: series.title || "Episode 1", plot: "", aired: "" }];
+          if (!episodes.length) episodes = [{ seasonNumber: 1, episodeNumber: 1, title: series.title || "Episode 1", plot: "", aired: "" }];
+        }
+
+        // ✅ 纯手动模式：按用户输入结构生成季/集
+        if (source === "manual") {
+          send("progress", { step: "手动结构", current: 0, total: 0, message: "使用手动季/集结构生成…" });
+
+          const sCount = Math.max(1, Number(manualStructure?.seasons || 1));
+          const per = manualStructure?.episodesPerSeason ? Math.max(1, Number(manualStructure.episodesPerSeason)) : null;
+          const map = manualStructure?.seasonEpisodeMap || {};
+          const titleTpl = manualStructure?.episodeTitleTemplate || "Episode {{ episode }}";
+
+          seasons = [];
+          episodes = [];
+
+          for (let s = 1; s <= sCount; s++) {
+            const epCount = Number(map[String(s)]) || per || 1;
+            seasons.push({ seasonNumber: s, title: `Season ${s}`, plot: "" });
+
+            for (let e = 1; e <= epCount; e++) {
+              const ctx = {
+                season: s,
+                episode: e,
+                season_episode: seasonEpisode(s, e),
+                title: series.title || "",
+                year: series.year || ""
+              };
+              const epTitle = renderRenameTemplate(titleTpl, ctx) || `Episode ${e}`;
+              episodes.push({ seasonNumber: s, episodeNumber: e, title: epTitle, plot: "", aired: "" });
+            }
           }
         }
 
-        // 2) AI 补全缺失字段（可选）
+        // 2) AI 补全（可选）
         if (useAI) {
           send("progress", { step: "AI 补全", current: 0, total: 0, message: "调用 AI 补全缺失字段…" });
           const filled = await aiFillMissing(env, series);
@@ -208,15 +233,13 @@ export const onRequest = async (context: any) => {
           send("progress", { step: "AI 补全", current: 0, total: 0, message: "AI 补全完成" });
         }
 
-        // 3) 生成 Emby 目录结构文件
+        // 3) 生成 Emby NFO 目录结构（固定命名，保证 Emby 识别）
         const rootName = seriesRootFolderName(series.title || "Unknown", series.year || "");
         send("progress", { step: "生成 NFO", current: 0, total: 0, message: `根目录：${rootName}` });
 
         const files: Record<string, Uint8Array> = {};
         files[`${rootName}/tvshow.nfo`] = textFile(buildTvshowNfo(series));
 
-        // seasons + episodes
-        // 注意：Season 0（specials）也允许，但这里按现有数据输出
         const seasonSet = new Set<number>();
         for (const s of seasons) seasonSet.add(s.seasonNumber);
         for (const e of episodes) seasonSet.add(e.seasonNumber);
@@ -233,24 +256,91 @@ export const onRequest = async (context: any) => {
           }
         }
 
-        // 4) 下载图片（带流控）
+        // 4) 图片（可选）
         if (imageQueue.length) {
           send("progress", { step: "下载图片", current: 0, total: imageQueue.length, message: `共 ${imageQueue.length} 张` });
-          const imgMap = await downloadImagesToMap(env, imageQueue.map((x) => ({ key: `${rootName}/${x.key}`, url: x.url })), (i, total, msg) => {
-            send("progress", { step: "下载图片", current: i, total, message: msg });
-          });
+          const imgMap = await downloadImagesToMap(
+            env,
+            imageQueue.map((x) => ({ key: `${rootName}/${x.key}`, url: x.url })),
+            (i, total, msg) => send("progress", { step: "下载图片", current: i, total, message: msg })
+          );
           for (const [k, v] of Object.entries(imgMap)) files[k] = v;
         }
 
-        // 5) 打 zip + 存 R2 + 返回下载
+        // ✅ 5) 重命名 mapping（MoviePilot 风格）
+        if (rename?.originals?.length) {
+          send("progress", { step: "生成重命名", current: 0, total: 0, message: `原始文件数：${rename.originals.length}` });
+
+          const tvFormat = rename.tvFormat || `{{ title }}{% if year %} ({{ year }}){% endif %}/Season {{ season }}/{{ title }} - {{ season_episode }}{% if episode_title %} - {{ episode_title }}{% endif %}{{ fileExt }}`;
+          const movieFormat = rename.movieFormat || `{{ title }}{% if year %} ({{ year }}){% endif %}/{{ title }}{% if year %} ({{ year }}){% endif %}{{ fileExt }}`;
+
+          const csvLines: string[] = ["original,new"];
+          const preview: string[] = [];
+
+          // 依据 episodes 列表给 tv 做顺序匹配；movie 就全部同名不同 ext
+          const epsSorted = [...episodes].sort((a, b) => (a.seasonNumber - b.seasonNumber) || (a.episodeNumber - b.episodeNumber));
+
+          let epIdx = 0;
+
+          for (let i = 0; i < rename.originals.length; i++) {
+            const original = rename.originals[i] || "";
+            const { ext } = splitExt(original);
+            const ctxBase: any = {
+              title: series.title || "",
+              en_title: "",
+              original_title: series.originalTitle || "",
+              year: series.year || "",
+              tmdbid: (series.uniqueIds?.tmdb || "") as string,
+              imdbid: (series.uniqueIds?.imdb || "") as string,
+              original_name: original,
+              fileExt: ext || "",
+              customization: rename.customization || ""
+            };
+
+            let newPath = "";
+
+            if (mediaType === "movie") {
+              newPath = renderRenameTemplate(movieFormat, ctxBase);
+            } else {
+              const ep = epsSorted[epIdx] || null;
+              const s = ep?.seasonNumber || 1;
+              const e = ep?.episodeNumber || (epIdx + 1);
+              const ctxTv = {
+                ...ctxBase,
+                season: s,
+                episode: e,
+                season_episode: seasonEpisode(s, e),
+                episode_title: ep?.title || "",
+                episode_date: ep?.aired || "",
+                season_year: ""
+              };
+              newPath = renderRenameTemplate(tvFormat, ctxTv);
+              epIdx++;
+            }
+
+            newPath = sanitizePathLike(newPath);
+            if (!newPath) newPath = sanitizePathLike(original);
+
+            csvLines.push(`${csvEscape(original)},${csvEscape(newPath)}`);
+            preview.push(`${original}  ->  ${newPath}`);
+          }
+
+          files[`${rootName}/rename/rename_map.csv`] = textFile(csvLines.join("\n"));
+          files[`${rootName}/rename/rename_preview.txt`] = textFile(preview.join("\n"));
+        }
+
+        // 6) 打包 zip + 存 R2 + 返回下载
         send("progress", { step: "打包", current: 0, total: 0, message: "生成 zip…" });
         const zip = makeZip(files);
 
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         const key = `zips/${rootName}-${stamp}.zip`;
-        await env.META_BUCKET.put(key, zip, {
-          httpMetadata: { contentType: "application/zip" }
-        });
+
+        if (!env.META_BUCKET) {
+          throw new Error("R2 未绑定：请在 Pages -> Settings -> Bindings 绑定 R2 Bucket 到变量名 META_BUCKET（Production 环境也要绑）。");
+        }
+
+        await env.META_BUCKET.put(key, zip, { httpMetadata: { contentType: "application/zip" } });
 
         const downloadUrl = new URL("/api/download", new URL(context.request.url).origin);
         downloadUrl.searchParams.set("key", key);
@@ -297,4 +387,10 @@ function mergeSeries(base: any, filled: any) {
     out.uniqueIds = { ...(out.uniqueIds || {}), ...filled.uniqueIds };
   }
   return out;
+}
+
+function csvEscape(s: string) {
+  const v = String(s ?? "");
+  if (/[,"\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
 }
