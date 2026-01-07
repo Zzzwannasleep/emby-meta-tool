@@ -100,3 +100,13 @@ export function pad2(n: number) {
 export function episodeNfoName(season: number, episode: number) {
   return `S${pad2(season)}E${pad2(episode)}.nfo`;
 }
+
+export function episodeThumbName(season: number, episode: number) {
+  // Emby/Kodi 常用的集封面命名
+  return `S${pad2(season)}E${pad2(episode)}-thumb.jpg`;
+}
+
+export function seasonPosterName(season: number) {
+  // 常见季封面命名：poster.jpg 放在 Season 目录内即可被识别
+  return `poster.jpg`;
+}

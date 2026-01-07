@@ -76,6 +76,12 @@ type ManualEpisodeMeta = {
   aired: string;
 };
 
+type CoverState = {
+  season: Record<string, string>; // seasonNumber -> dataURL
+  episode: Record<string, string>; // "s-e" -> dataURL
+  videoUrl: string; // object URL for local video preview
+};
+
 type State = {
   source: SourceType;
   mediaType: MediaType;
@@ -98,6 +104,8 @@ type State = {
   manual: ManualMeta;
   manualStructure: ManualStructure;
   manualEpisode: ManualEpisodeMeta;
+
+  covers: CoverState;
 
   // rename
   rename: RenameConfig;
@@ -151,6 +159,12 @@ const state: State = {
     title: "",
     plot: "",
     aired: ""
+  },
+
+  covers: {
+    season: {},
+    episode: {},
+    videoUrl: ""
   },
 
   rename: {
@@ -274,6 +288,98 @@ function normalizeManualEpisode() {
     title: state.manualEpisode.title || "",
     plot: state.manualEpisode.plot || "",
     aired: state.manualEpisode.aired || ""
+  };
+}
+
+function episodeKey(season: number, episode: number) {
+  return `${season}-${episode}`;
+}
+
+async function fileToDataUrl(file: File) {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = (e) => reject(e);
+    reader.readAsDataURL(file);
+  });
+}
+
+function cropToAspect(img: HTMLImageElement, aspect: number, maxWidth: number, mime = "image/jpeg", quality = 0.9) {
+  const sw = img.width;
+  const sh = img.height;
+  if (!sw || !sh) return "";
+  // 目标尺寸
+  let tw = Math.min(sw, maxWidth);
+  let th = Math.round(tw / aspect);
+  if (th > sh) {
+    th = sh;
+    tw = Math.round(th * aspect);
+  }
+  // 居中裁剪源区域
+  const targetAspect = aspect;
+  const srcAspect = sw / sh;
+  let sx = 0, sy = 0, cw = sw, ch = sh;
+  if (srcAspect > targetAspect) {
+    // 太宽，截左右
+    ch = sh;
+    cw = Math.round(ch * targetAspect);
+    sx = Math.floor((sw - cw) / 2);
+  } else {
+    // 太高，截上下
+    cw = sw;
+    ch = Math.round(cw / targetAspect);
+    sy = Math.floor((sh - ch) / 2);
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = tw;
+  canvas.height = th;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  ctx.drawImage(img, sx, sy, cw, ch, 0, 0, tw, th);
+  return canvas.toDataURL(mime, quality);
+}
+
+async function loadImageAndCrop(file: File, aspect: number, maxWidth: number) {
+  const dataUrl = await fileToDataUrl(file);
+  const img = new Image();
+  img.src = dataUrl;
+  await img.decode();
+  return cropToAspect(img, aspect, maxWidth);
+}
+
+async function setSeasonCoverFromFile(file: File, season: number) {
+  const cropped = await loadImageAndCrop(file, 2 / 3, 1000);
+  if (!cropped) return;
+  state.covers.season[String(season)] = cropped;
+  render();
+}
+
+async function setEpisodeCoverFromFile(file: File, season: number, episode: number) {
+  const cropped = await loadImageAndCrop(file, 16 / 9, 1280);
+  if (!cropped) return;
+  state.covers.episode[episodeKey(season, episode)] = cropped;
+  render();
+}
+
+function setEpisodeCoverFromVideoFrame(video: HTMLVideoElement, season: number, episode: number) {
+  if (!video.videoWidth || !video.videoHeight) return;
+  const img = new Image();
+  const canvas = document.createElement("canvas");
+  // capture current frame
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const frameUrl = canvas.toDataURL("image/jpeg", 0.9);
+  img.src = frameUrl;
+  img.onload = () => {
+    const cropped = cropToAspect(img, 16 / 9, 1280);
+    if (cropped) {
+      state.covers.episode[episodeKey(season, episode)] = cropped;
+      render();
+    }
   };
 }
 
@@ -556,6 +662,11 @@ function buildGeneratePayload() {
       customization: state.rename.customization,
       originals: getOriginalsList(),
       nfoNameMode: state.rename.nfoNameMode
+    },
+
+    images: {
+      seasons: state.covers.season,
+      episodes: state.covers.episode
     }
   };
 
@@ -748,6 +859,24 @@ function render() {
   ($("s_seasonPlots") as HTMLTextAreaElement).value = state.manualStructure.seasonPlotsText ?? "";
   ($("s_episodePlots") as HTMLTextAreaElement).value = state.manualStructure.episodePlotsText ?? "";
 
+  const coverSeasonInput = document.getElementById("c_season") as HTMLInputElement | null;
+  if (coverSeasonInput) {
+    const cs = Number(coverSeasonInput.value || 1);
+    const url = state.covers.season[String(cs)] || "";
+    const img = document.getElementById("previewSeasonCover") as HTMLImageElement | null;
+    if (img) img.src = url;
+  }
+
+  const coverEpSeasonInput = document.getElementById("c_ep_season") as HTMLInputElement | null;
+  const coverEpInput = document.getElementById("c_ep_episode") as HTMLInputElement | null;
+  if (coverEpSeasonInput && coverEpInput) {
+    const cs = Number(coverEpSeasonInput.value || 1);
+    const ce = Number(coverEpInput.value || 1);
+    const url = state.covers.episode[episodeKey(cs, ce)] || "";
+    const img = document.getElementById("previewEpisodeCover") as HTMLImageElement | null;
+    if (img) img.src = url;
+  }
+
   const meEnable = $("me_enable") as HTMLInputElement;
   meEnable.checked = state.manualEpisode.enabled;
   ($("me_season") as HTMLInputElement).value = String(state.manualEpisode.seasonNumber ?? "");
@@ -857,6 +986,54 @@ function bind() {
   $("me_title").addEventListener("input", (e) => (state.manualEpisode.title = (e.target as HTMLInputElement).value));
   $("me_aired").addEventListener("input", (e) => (state.manualEpisode.aired = (e.target as HTMLInputElement).value));
   $("me_plot").addEventListener("input", (e) => (state.manualEpisode.plot = (e.target as HTMLTextAreaElement).value));
+
+  // covers
+  const seasonFileInput = document.getElementById("fileSeasonCover") as HTMLInputElement;
+  if (seasonFileInput) {
+    $("btnSeasonCover").addEventListener("click", () => seasonFileInput.click());
+    seasonFileInput.addEventListener("change", async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const season = Number((document.getElementById("c_season") as HTMLInputElement).value || 1);
+      await setSeasonCoverFromFile(file, season || 1);
+      (e.target as HTMLInputElement).value = "";
+    });
+  }
+
+  const epImgInput = document.getElementById("fileEpisodeCover") as HTMLInputElement;
+  if (epImgInput) {
+    $("btnEpisodeCover").addEventListener("click", () => epImgInput.click());
+    epImgInput.addEventListener("change", async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const season = Number((document.getElementById("c_ep_season") as HTMLInputElement).value || 1);
+      const episode = Number((document.getElementById("c_ep_episode") as HTMLInputElement).value || 1);
+      await setEpisodeCoverFromFile(file, season || 1, episode || 1);
+      (e.target as HTMLInputElement).value = "";
+    });
+  }
+
+  const epVideoInput = document.getElementById("fileEpisodeVideo") as HTMLInputElement;
+  const epVideo = document.getElementById("episodeVideo") as HTMLVideoElement | null;
+  if (epVideoInput && epVideo) {
+    $("btnEpisodeVideo").addEventListener("click", () => epVideoInput.click());
+    epVideoInput.addEventListener("change", (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      if (state.covers.videoUrl) URL.revokeObjectURL(state.covers.videoUrl);
+      const url = URL.createObjectURL(file);
+      state.covers.videoUrl = url;
+      epVideo.src = url;
+      epVideo.load();
+    });
+  }
+  if (epVideo) {
+    $("btnCaptureFrame").addEventListener("click", () => {
+      const season = Number((document.getElementById("c_ep_season") as HTMLInputElement).value || 1);
+      const episode = Number((document.getElementById("c_ep_episode") as HTMLInputElement).value || 1);
+      setEpisodeCoverFromVideoFrame(epVideo, season || 1, episode || 1);
+    });
+  }
 
   // rename
   $("tvFormat").addEventListener("input", (e) => (state.rename.tvFormat = (e.target as HTMLTextAreaElement).value));
@@ -1127,6 +1304,39 @@ function injectSkeleton() {
           <textarea id="me_plot" class="textarea" rows="3" placeholder="集简介（可选）"></textarea>
           <div class="muted">启用单集自定义后，系列/季信息以上方手动信息为准，集信息以此处填写为主。</div>
         </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">3.5) 集 / 季封面（可选）</div>
+        <div class="row">
+          <div class="muted">仅用于生成 NFO 同级的 jpg；会自动裁剪为 TMDB 常用比例。</div>
+        </div>
+
+        <div class="row">
+          <input id="c_season" class="input" style="width:120px" placeholder="季号" value="1" />
+          <button id="btnSeasonCover" class="btn">导入季封面 JPG</button>
+          <div class="muted">比例 2:3，最大宽度 1000px</div>
+        </div>
+        <div class="row" style="align-items:flex-start;">
+          <img id="previewSeasonCover" style="width:120px;border:1px solid #ddd;border-radius:8px;object-fit:cover;" />
+        </div>
+
+        <div class="row" style="margin-top:8px;">
+          <input id="c_ep_season" class="input" style="width:120px" placeholder="季号" value="1" />
+          <input id="c_ep_episode" class="input" style="width:120px" placeholder="集号" value="1" />
+          <button id="btnEpisodeCover" class="btn">导入集封面 JPG</button>
+          <button id="btnEpisodeVideo" class="btn">载入本地视频</button>
+          <button id="btnCaptureFrame" class="btn">截帧并裁剪</button>
+          <div class="muted">比例 16:9，最大宽度 1280px</div>
+        </div>
+        <div class="row" style="align-items:flex-start;">
+          <video id="episodeVideo" style="max-width:320px;max-height:180px;border:1px solid #ddd;border-radius:8px;" controls></video>
+          <img id="previewEpisodeCover" style="width:160px;border:1px solid #ddd;border-radius:8px;object-fit:cover;" />
+        </div>
+
+        <input id="fileSeasonCover" type="file" accept="image/*" style="display:none" />
+        <input id="fileEpisodeCover" type="file" accept="image/*" style="display:none" />
+        <input id="fileEpisodeVideo" type="file" accept="video/*" style="display:none" />
       </div>
 
       <div class="card">

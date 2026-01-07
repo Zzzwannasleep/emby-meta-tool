@@ -6,6 +6,8 @@ import {
   buildSeasonNfo,
   buildTvshowNfo,
   episodeNfoName,
+  episodeThumbName,
+  seasonPosterName,
   seasonFolderName,
   seriesRootFolderName
 } from "../../shared/emby";
@@ -69,6 +71,28 @@ export const onRequest = async (context: any) => {
         originals?: string[];
         nfoNameMode?: "standard" | "same_as_media" | "both";
       };
+
+  const images = (req.images || null) as
+    | null
+    | {
+        seasons?: Record<string, string>; // seasonNumber -> dataURL
+        episodes?: Record<string, string>; // `${season}-${episode}` -> dataURL
+      };
+
+  const dataUrlToUint8 = (dataUrl: string | undefined | null): Uint8Array | null => {
+    if (!dataUrl) return null;
+    const m = dataUrl.match(/^data:(.+);base64,(.+)$/);
+    if (!m) return null;
+    const b64 = m[2];
+    const binary =
+      typeof atob === "function"
+        ? atob(b64)
+        : Buffer.from(b64, "base64").toString("binary");
+    const len = binary.length;
+    const u8 = new Uint8Array(len);
+    for (let i = 0; i < len; i++) u8[i] = binary.charCodeAt(i);
+    return u8;
+  };
 
   const stream = new ReadableStream({
     start: async (controller) => {
@@ -319,6 +343,11 @@ export const onRequest = async (context: any) => {
           const folder = `${rootName}/${seasonFolderName(sn)}`;
           const sObj = seasons.find((x) => x.seasonNumber === sn) || { seasonNumber: sn, title: `Season ${sn}`, plot: "" };
           files[`${folder}/season.nfo`] = textFile(buildSeasonNfo(sObj));
+          const seasonImg = images?.seasons?.[String(sn)];
+          const seasonBuf = dataUrlToUint8(seasonImg);
+          if (seasonBuf) {
+            files[`${folder}/${seasonPosterName(sn)}`] = seasonBuf;
+          }
 
           const eps = episodes
             .filter((x) => x.seasonNumber === sn)
@@ -340,6 +369,12 @@ export const onRequest = async (context: any) => {
                 const safe = base.replace(/[\\:*?"<>|]/g, "_");
                 files[`${folder}/${safe}.nfo`] = content;
               }
+            }
+
+            const epImg = images?.episodes?.[`${sn}-${ep.episodeNumber}`];
+            const epBuf = dataUrlToUint8(epImg);
+            if (epBuf) {
+              files[`${folder}/${episodeThumbName(sn, ep.episodeNumber)}`] = epBuf;
             }
           }
         }
