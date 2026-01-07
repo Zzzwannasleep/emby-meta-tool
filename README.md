@@ -32,6 +32,106 @@
 
 ---
 
+## 📡 API 调用（Cloudflare / VPS 通用）
+
+所有接口为 `application/json`，默认无鉴权；部署在 CF Pages/Workers 或自建 VPS 时路径一致，视需求自行加网关/鉴权。
+
+### 1) 搜索  
+`POST /api/search`
+```json
+{
+  "source": "tmdb | bangumi | anidb",
+  "mediaType": "tv | movie | anime",
+  "lang": "zh-CN",
+  "query": "关键词",
+  "id": "可选，已有 ID 可直接传"
+}
+```
+返回：`[{ id, title, originalTitle, year, type, poster, extra }]`
+
+### 2) TMDB 剧集组  
+`POST /api/episode-groups`
+```json
+{ "tmdbTvId": "数字ID", "lang": "zh-CN" }
+```
+返回：`[{ id, name, description, episode_count, group_count }]`
+
+### 3) 预览重命名 / NFO 命名  
+`POST /api/preview`
+```json
+{
+  "mediaType": "tv | movie | anime",
+  "series": { "title": "...", "originalTitle": "...", "year": "2024" },
+  "episodes": [{ "seasonNumber": 1, "episodeNumber": 1, "title": "Ep1" }],
+  "rename": {
+    "tvFormat": "模板",
+    "movieFormat": "模板",
+    "customization": "",
+    "originals": ["原始文件名..."],
+    "nfoNameMode": "both | standard | same_as_media"
+  }
+}
+```
+返回：`{ rows: [{ original, parsed:{season,episode}, mediaPath, nfoPreview[] }] }`（最多前 50 行）
+
+### 4) 生成并打包（SSE）  
+`POST /api/generate`（事件：progress / done / error）
+```json
+{
+  "source": "tmdb | bangumi | anidb | manual",
+  "mediaType": "tv | movie | anime",
+  "lang": "zh-CN",
+  "id": "ID，manual 可为 null",
+  "episodeGroupId": "可选",
+  "useAI": false,
+  "manual": { "title": "", "originalTitle": "", "year": "", "plot": "", "premiered": "", "rating": "", "genres": "", "studios": "", "actors": "" },
+  "manualStructure": {
+    "seasons": 1,
+    "episodesPerSeason": 12,
+    "seasonEpisodeMap": { "1": 12 },
+    "episodeTitleTemplate": "Episode {{ episode }}",
+    "seasonPlots": { "1": "本季简介" },
+    "episodePlots": { "1-1": "本集简介" }
+  },
+  "manualEpisode": { "seasonNumber": 1, "episodeNumber": 1, "title": "", "plot": "", "aired": "" },
+  "rename": {
+    "tvFormat": "",
+    "movieFormat": "",
+    "customization": "",
+    "originals": ["原始文件名..."],
+    "nfoNameMode": "both | standard | same_as_media"
+  },
+  "images": {
+    "seasons": { "1": "data:image/jpeg;base64,..." },      // 2:3，宽≤1000
+    "episodes": { "1-1": "data:image/jpeg;base64,..." }    // 16:9，宽≤1280
+  }
+}
+```
+SSE 返回：
+- `event: progress` `{ step, current, total, message }`
+- `event: done` `{ downloadUrl }`
+- `event: error` `{ message }`
+
+生成 ZIP 结构（节选）：
+```
+Show (Year)/
+├─ tvshow.nfo
+├─ poster.jpg
+├─ Season 01/
+│  ├─ season.nfo
+│  ├─ poster.jpg           # 手动/上传季封面
+│  ├─ S01E01.nfo
+│  ├─ S01E01-thumb.jpg     # 手动/截帧集封面
+│  └─ ...
+└─ rename/
+   ├─ rename_map.csv
+   └─ rename_preview.txt
+```
+
+> 若对公网开放，务必自行加鉴权/限流。
+
+---
+
 ## 📦 生成内容说明
 
 生成的 ZIP 文件包含：
