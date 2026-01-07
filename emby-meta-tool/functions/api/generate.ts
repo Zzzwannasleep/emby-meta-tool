@@ -45,6 +45,18 @@ export const onRequest = async (context: any) => {
         episodesPerSeason?: number;
         seasonEpisodeMap?: Record<string, number>;
         episodeTitleTemplate?: string;
+        seasonPlots?: Record<string, string>;
+        episodePlots?: Record<string, string>;
+      };
+
+  const manualEpisode = (req.manualEpisode || null) as
+    | null
+    | {
+        seasonNumber: number;
+        episodeNumber: number;
+        title?: string;
+        plot?: string;
+        aired?: string;
       };
 
   // ✅ 重命名配置（新增 nfoNameMode）
@@ -217,24 +229,55 @@ export const onRequest = async (context: any) => {
           const per = manualStructure?.episodesPerSeason ? Math.max(1, Number(manualStructure.episodesPerSeason)) : null;
           const map = manualStructure?.seasonEpisodeMap || {};
           const titleTpl = manualStructure?.episodeTitleTemplate || "Episode {{ episode }}";
+          const seasonPlots = manualStructure?.seasonPlots || {};
+          const episodePlots = manualStructure?.episodePlots || {};
+
+          const manualEp = manualEpisode && Number(manualEpisode.seasonNumber) && Number(manualEpisode.episodeNumber) ? manualEpisode : null;
 
           seasons = [];
           episodes = [];
 
-          for (let s = 1; s <= sCount; s++) {
-            const epCount = Number(map[String(s)]) || per || 1;
-            seasons.push({ seasonNumber: s, title: `Season ${s}`, plot: "" });
+          if (manualEp) {
+            const s = Math.max(1, Number(manualEp.seasonNumber));
+            const e = Math.max(1, Number(manualEp.episodeNumber));
+            const ctx = {
+              season: s,
+              episode: e,
+              season_episode: seasonEpisode(s, e),
+              title: series.title || "",
+              year: series.year || ""
+            };
+            const epTitle = manualEp.title || renderRenameTemplate(titleTpl, ctx) || `Episode ${e}`;
+            seasons.push({ seasonNumber: s, title: `Season ${s}`, plot: seasonPlots[String(s)] || "" });
+            episodes.push({
+              seasonNumber: s,
+              episodeNumber: e,
+              title: epTitle,
+              plot: manualEp.plot || episodePlots[`${s}-${e}`] || "",
+              aired: manualEp.aired || ""
+            });
+          } else {
+            for (let s = 1; s <= sCount; s++) {
+              const epCount = Number(map[String(s)]) || per || 1;
+              seasons.push({ seasonNumber: s, title: `Season ${s}`, plot: seasonPlots[String(s)] || "" });
 
-            for (let e = 1; e <= epCount; e++) {
-              const ctx = {
-                season: s,
-                episode: e,
-                season_episode: seasonEpisode(s, e),
-                title: series.title || "",
-                year: series.year || ""
-              };
-              const epTitle = renderRenameTemplate(titleTpl, ctx) || `Episode ${e}`;
-              episodes.push({ seasonNumber: s, episodeNumber: e, title: epTitle, plot: "", aired: "" });
+              for (let e = 1; e <= epCount; e++) {
+                const ctx = {
+                  season: s,
+                  episode: e,
+                  season_episode: seasonEpisode(s, e),
+                  title: series.title || "",
+                  year: series.year || ""
+                };
+                const epTitle = renderRenameTemplate(titleTpl, ctx) || `Episode ${e}`;
+                episodes.push({
+                  seasonNumber: s,
+                  episodeNumber: e,
+                  title: epTitle,
+                  plot: episodePlots[`${s}-${e}`] || "",
+                  aired: ""
+                });
+              }
             }
           }
         }

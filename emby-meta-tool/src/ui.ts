@@ -43,6 +43,8 @@ type ManualStructure = {
   episodesPerSeason?: number;
   seasonEpisodeMapText?: string; // "1:12,2:10"
   episodeTitleTemplate?: string;
+  seasonPlotsText?: string;
+  episodePlotsText?: string;
 };
 
 type RenameConfig = {
@@ -63,6 +65,15 @@ type ManualMeta = {
   genres: string;
   studios: string;
   actors: string;
+};
+
+type ManualEpisodeMeta = {
+  enabled: boolean;
+  seasonNumber: number;
+  episodeNumber: number;
+  title: string;
+  plot: string;
+  aired: string;
 };
 
 type State = {
@@ -86,6 +97,7 @@ type State = {
   // manual
   manual: ManualMeta;
   manualStructure: ManualStructure;
+  manualEpisode: ManualEpisodeMeta;
 
   // rename
   rename: RenameConfig;
@@ -127,7 +139,18 @@ const state: State = {
     seasons: 1,
     episodesPerSeason: 12,
     seasonEpisodeMapText: "",
-    episodeTitleTemplate: "Episode {{ episode }}"
+    episodeTitleTemplate: "Episode {{ episode }}",
+    seasonPlotsText: "",
+    episodePlotsText: ""
+  },
+
+  manualEpisode: {
+    enabled: false,
+    seasonNumber: 1,
+    episodeNumber: 1,
+    title: "",
+    plot: "",
+    aired: ""
   },
 
   rename: {
@@ -212,6 +235,48 @@ function parseSeasonMap(text: string): Record<string, number> {
   return out;
 }
 
+function parseSeasonPlotMap(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const lines = (text || "").split("\n");
+  for (const raw of lines) {
+    const t = raw.trim();
+    if (!t) continue;
+    const m = t.match(/^(\d+)\s*[:：]\s*(.+)$/);
+    if (!m) continue;
+    out[m[1]] = m[2].trim();
+  }
+  return out;
+}
+
+function parseEpisodePlotMap(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const lines = (text || "").split("\n");
+  for (const raw of lines) {
+    const t = raw.trim();
+    if (!t) continue;
+    const m = t.match(/^S?0*(\d+)[xXeE-]0*(\d+)\s*[:：]\s*(.+)$/);
+    if (!m) continue;
+    const key = `${parseInt(m[1], 10)}-${parseInt(m[2], 10)}`;
+    out[key] = m[3].trim();
+  }
+  return out;
+}
+
+function normalizeManualEpisode() {
+  if (!state.manualEpisode.enabled) return null;
+  const seasonNumber = Number(state.manualEpisode.seasonNumber || 0);
+  const episodeNumber = Number(state.manualEpisode.episodeNumber || 0);
+  if (!seasonNumber || !episodeNumber) return null;
+
+  return {
+    seasonNumber,
+    episodeNumber,
+    title: state.manualEpisode.title || "",
+    plot: state.manualEpisode.plot || "",
+    aired: state.manualEpisode.aired || ""
+  };
+}
+
 function getOriginalsList(): string[] {
   return (state.rename.originalsText || "")
     .split("\n")
@@ -221,6 +286,11 @@ function getOriginalsList(): string[] {
 
 function buildEpisodesFromManualStructure() {
   // 用于 preview：我们只需要 season/episode 列表（不强依赖真实标题）
+  const manualEp = normalizeManualEpisode();
+  if (manualEp) {
+    return [{ seasonNumber: manualEp.seasonNumber, episodeNumber: manualEp.episodeNumber, title: manualEp.title || "" }];
+  }
+
   const seasons = Math.max(1, Number(state.manualStructure.seasons || 1));
   const per = state.manualStructure.episodesPerSeason ? Math.max(1, Number(state.manualStructure.episodesPerSeason)) : 1;
   const map = parseSeasonMap(state.manualStructure.seasonEpisodeMapText || "");
@@ -442,6 +512,8 @@ async function apiPreview() {
 
 function buildGeneratePayload() {
   // 后端 generate.ts 预期字段（你现在 generate.ts 如果名字不同，改这里）
+  const manualEp = normalizeManualEpisode();
+
   const payload: any = {
     source: state.source,
     mediaType: state.mediaType,
@@ -471,8 +543,12 @@ function buildGeneratePayload() {
       seasons: Number(state.manualStructure.seasons || 1),
       episodesPerSeason: Number(state.manualStructure.episodesPerSeason || 1),
       seasonEpisodeMap: parseSeasonMap(state.manualStructure.seasonEpisodeMapText || ""),
-      episodeTitleTemplate: state.manualStructure.episodeTitleTemplate || "Episode {{ episode }}"
+      episodeTitleTemplate: state.manualStructure.episodeTitleTemplate || "Episode {{ episode }}",
+      seasonPlots: parseSeasonPlotMap(state.manualStructure.seasonPlotsText || ""),
+      episodePlots: parseEpisodePlotMap(state.manualStructure.episodePlotsText || "")
     },
+
+    manualEpisode: manualEp,
 
     rename: {
       tvFormat: state.rename.tvFormat,
@@ -669,6 +745,21 @@ function render() {
   ($("s_epsPer") as HTMLInputElement).value = String(state.manualStructure.episodesPerSeason ?? "");
   ($("s_map") as HTMLInputElement).value = state.manualStructure.seasonEpisodeMapText ?? "";
   ($("s_epTitleTpl") as HTMLInputElement).value = state.manualStructure.episodeTitleTemplate ?? "";
+  ($("s_seasonPlots") as HTMLTextAreaElement).value = state.manualStructure.seasonPlotsText ?? "";
+  ($("s_episodePlots") as HTMLTextAreaElement).value = state.manualStructure.episodePlotsText ?? "";
+
+  const meEnable = $("me_enable") as HTMLInputElement;
+  meEnable.checked = state.manualEpisode.enabled;
+  ($("me_season") as HTMLInputElement).value = String(state.manualEpisode.seasonNumber ?? "");
+  ($("me_episode") as HTMLInputElement).value = String(state.manualEpisode.episodeNumber ?? "");
+  ($("me_title") as HTMLInputElement).value = state.manualEpisode.title;
+  ($("me_aired") as HTMLInputElement).value = state.manualEpisode.aired;
+  ($("me_plot") as HTMLTextAreaElement).value = state.manualEpisode.plot;
+  const manualEpDisabled = !state.manualEpisode.enabled;
+  ["me_season", "me_episode", "me_title", "me_aired", "me_plot"].forEach((id) => {
+    const node = $(id) as HTMLInputElement | HTMLTextAreaElement;
+    node.disabled = manualEpDisabled;
+  });
 
   ($("tvFormat") as HTMLTextAreaElement).value = state.rename.tvFormat;
   ($("movieFormat") as HTMLTextAreaElement).value = state.rename.movieFormat;
@@ -741,6 +832,31 @@ function bind() {
     "input",
     (e) => (state.manualStructure.episodeTitleTemplate = (e.target as HTMLInputElement).value)
   );
+  $("s_seasonPlots").addEventListener(
+    "input",
+    (e) => (state.manualStructure.seasonPlotsText = (e.target as HTMLTextAreaElement).value)
+  );
+  $("s_episodePlots").addEventListener(
+    "input",
+    (e) => (state.manualStructure.episodePlotsText = (e.target as HTMLTextAreaElement).value)
+  );
+
+  // manual episode
+  $("me_enable").addEventListener("change", (e) => {
+    state.manualEpisode.enabled = (e.target as HTMLInputElement).checked;
+    render();
+  });
+  $("me_season").addEventListener(
+    "input",
+    (e) => (state.manualEpisode.seasonNumber = Number((e.target as HTMLInputElement).value || 0))
+  );
+  $("me_episode").addEventListener(
+    "input",
+    (e) => (state.manualEpisode.episodeNumber = Number((e.target as HTMLInputElement).value || 0))
+  );
+  $("me_title").addEventListener("input", (e) => (state.manualEpisode.title = (e.target as HTMLInputElement).value));
+  $("me_aired").addEventListener("input", (e) => (state.manualEpisode.aired = (e.target as HTMLInputElement).value));
+  $("me_plot").addEventListener("input", (e) => (state.manualEpisode.plot = (e.target as HTMLTextAreaElement).value));
 
   // rename
   $("tvFormat").addEventListener("input", (e) => (state.rename.tvFormat = (e.target as HTMLTextAreaElement).value));
@@ -974,6 +1090,42 @@ function injectSkeleton() {
           <div class="row">
             <input id="s_epTitleTpl" class="input flex" placeholder="集标题模板（可选）如 Episode {{ episode }}" />
           </div>
+
+          <div class="card-title" style="margin-top:12px;">季 / 集简介（可选）</div>
+          <div class="row">
+            <textarea
+              id="s_seasonPlots"
+              class="textarea"
+              rows="2"
+              placeholder="每行一个季简介：1: 这一季的简介"
+            ></textarea>
+          </div>
+          <div class="row">
+            <textarea
+              id="s_episodePlots"
+              class="textarea"
+              rows="3"
+              placeholder="每行一个集简介：S01E02: 本集简介 或 1-2: 本集简介"
+            ></textarea>
+          </div>
+
+          <div class="card-title" style="margin-top:12px;">单集元数据（可选）</div>
+          <div class="row">
+            <label class="checkbox">
+              <input id="me_enable" type="checkbox" />
+              <span>启用单集自定义（仅生成此集）</span>
+            </label>
+          </div>
+          <div class="row">
+            <input id="me_season" class="input" style="width:120px" placeholder="季号" />
+            <input id="me_episode" class="input" style="width:120px" placeholder="集号" />
+            <input id="me_title" class="input flex" placeholder="集标题" />
+          </div>
+          <div class="row">
+            <input id="me_aired" class="input" style="width:220px" placeholder="首播日期 YYYY-MM-DD（可选）" />
+          </div>
+          <textarea id="me_plot" class="textarea" rows="3" placeholder="集简介（可选）"></textarea>
+          <div class="muted">启用单集自定义后，系列/季信息以上方手动信息为准，集信息以此处填写为主。</div>
         </div>
       </div>
 
