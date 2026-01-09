@@ -264,6 +264,32 @@ function renderLogs() {
   el.textContent = state.logs.join("\n");
 }
 
+function renderMetaPreview() {
+  const box = document.getElementById("metaPreviewBox") as HTMLElement | null;
+  if (!box) return;
+
+  const title = state.manual.title || state.selected?.title || "(未选择)";
+  const original = state.manual.originalTitle || state.selected?.originalTitle || "";
+  const year = state.manual.year || state.selected?.year || "";
+  const lang = state.lang;
+  const mediaType = state.mediaType;
+  const source = state.source;
+  const id = state.selected?.id || state.idInput || "";
+  const epCount = buildEpisodesFromManualStructure().length;
+
+  box.innerHTML = `
+    <div class="muted" style="margin-bottom:6px;">实时预览（非手动模式时显示当前选择的信息）</div>
+    <div class="result-item" style="cursor:default;">
+      <div style="font-weight:800;">${escapeHtml(title)}${year ? ` (${escapeHtml(year)})` : ""}</div>
+      ${original ? `<div class="muted">原名：${escapeHtml(original)}</div>` : ""}
+      <div class="muted">来源：${escapeHtml(source.toUpperCase())} · 类型：${escapeHtml(mediaType)} · 语言：${escapeHtml(lang)}</div>
+      ${id ? `<div class="muted">ID：${escapeHtml(id)}</div>` : ""}
+      <div class="muted">预计集数：${epCount}</div>
+      <div class="muted">NFO 命名：${escapeHtml(state.rename.nfoNameMode)}</div>
+    </div>
+  `;
+}
+
 function parseSeasonMap(text: string): Record<string, number> {
   const out: Record<string, number> = {};
   const s = (text || "").trim();
@@ -1052,16 +1078,25 @@ function render() {
   ($("originals") as HTMLTextAreaElement).value = state.rename.originalsText;
   ($("nfoMode") as HTMLSelectElement).value = state.rename.nfoNameMode;
 
+  // 预览/手动切换
+  const metaBox = document.getElementById("metaPreviewBox") as HTMLElement | null;
+  const manualBox = $("manualBox");
+  if (state.source === "manual") {
+    if (metaBox) metaBox.style.display = "none";
+    manualBox.style.display = "block";
+  } else {
+    if (metaBox) metaBox.style.display = "block";
+    manualBox.style.display = "none";
+    renderMetaPreview();
+  }
+
   renderSelected();
   renderEpisodeGroups();
   renderStatus();
   renderLogs();
   renderUploadButtons();
   renderUploadDialog();
-
-  // 根据 source 显示/隐藏某些区域
-  const manualBox = $("manualBox");
-  manualBox.style.display = state.source === "manual" ? "block" : "none";
+  renderMetaPreview();
 
   const tmdbGroupBox = $("episodeGroupBox");
   tmdbGroupBox.style.display = state.source === "tmdb" && state.mediaType === "tv" ? "block" : "none";
@@ -1384,7 +1419,8 @@ function injectSkeleton() {
       </div>
 
       <div class="card">
-        <div class="card-title">3) 手动元数据（manual 模式）</div>
+        <div class="card-title">3) 预览 / 手动输入</div>
+        <div id="metaPreviewBox" class="preview-box"></div>
         <div id="manualBox">
           <div class="row">
             <input id="m_title" class="input flex" placeholder="标题（必填）" />
@@ -1596,6 +1632,7 @@ function injectSkeleton() {
   .modal-title{font-weight:800;margin-bottom:8px;}
   .modal.show{display:flex;}
   .upload-item{cursor:pointer;}
+  .preview-box{border:1px dashed rgba(0,0,0,.18);border-radius:12px;padding:10px;margin-bottom:10px;background:rgba(0,0,0,.02);}
   `;
   document.head.appendChild(style);
 }
