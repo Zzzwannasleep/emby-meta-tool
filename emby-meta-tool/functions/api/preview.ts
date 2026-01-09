@@ -5,7 +5,8 @@ export const onRequest = async (context: any) => {
   const env = context.env as Env;
   if (context.request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
-  const req = await context.request.json<any>().catch(() => null);
+  // Cloudflare Workers 的 Request.json 不是泛型，这里直接断言
+  const req = (await context.request.json().catch(() => null)) as any;
   if (!req) return new Response(JSON.stringify({ error: "Bad JSON" }), { status: 400 });
 
   const mediaType = (req.mediaType || "tv") as "tv" | "movie" | "anime";

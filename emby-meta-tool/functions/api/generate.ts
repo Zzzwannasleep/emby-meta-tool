@@ -11,6 +11,7 @@ import {
 } from "../../shared/emby";
 import { downloadImagesToMap, tmdbGetDetails, tmdbGetEpisodeGroup, tmdbGetTvSeason } from "../../shared/tmdb";
 import { bangumiGetEpisodes, bangumiGetSubject } from "../../shared/bangumi";
+import { uploadFileMap } from "../../shared/uploaders";
 import {
   renderRenameTemplate,
   sanitizePathLike,
@@ -36,6 +37,14 @@ export const onRequest = async (context: any) => {
   const episodeGroupId = (req.episodeGroupId || null) as string | null;
   const useAI = !!req.useAI;
   const manual = req.manual || {};
+  const uploadTarget = (req.uploadTarget || null) as "openlist" | "rclone" | null;
+  const uploadPath = (req.uploadPath || "/") as string;
+  const zipAfterUpload = uploadTarget ? !!(req.zipAfterUpload ?? false) : true;
+  const customImages = (req.customImages || {}) as {
+    poster?: { dataUrl?: string };
+    fanart?: { dataUrl?: string };
+    seasons?: Record<string, { dataUrl?: string }>;
+  };
 
   // ✅ 手动季集结构
   const manualStructure = (req.manualStructure || null) as
@@ -131,9 +140,11 @@ export const onRequest = async (context: any) => {
             series.actors = cast.slice(0, 20).map((c: any) => c.name).filter(Boolean);
           }
 
-          if (detail.poster_path) imageQueue.push({ key: "poster.jpg", url: `https://image.tmdb.org/t/p/original${detail.poster_path}` });
+          if (detail.poster_path && !customImages?.poster?.dataUrl)
+            imageQueue.push({ key: "poster.jpg", url: `https://image.tmdb.org/t/p/original${detail.poster_path}` });
           const backdrops = (detail.images?.backdrops || []).slice(0, 1);
-          if (backdrops[0]?.file_path) imageQueue.push({ key: "fanart.jpg", url: `https://image.tmdb.org/t/p/original${backdrops[0].file_path}` });
+          if (backdrops[0]?.file_path && !customImages?.fanart?.dataUrl)
+            imageQueue.push({ key: "fanart.jpg", url: `https://image.tmdb.org/t/p/original${backdrops[0].file_path}` });
 
           if (tm === "tv") {
             if (episodeGroupId) {
@@ -296,6 +307,8 @@ export const onRequest = async (context: any) => {
 
         const files: Record<string, Uint8Array> = {};
         files[`${rootName}/tvshow.nfo`] = textFile(buildTvshowNfo(series));
+        if (customImages?.poster?.dataUrl) files[`${rootName}/poster.jpg`] = dataUrlToUint8(customImages.poster.dataUrl);
+        if (customImages?.fanart?.dataUrl) files[`${rootName}/fanart.jpg`] = dataUrlToUint8(customImages.fanart.dataUrl);
 
         const seasonSet = new Set<number>();
         for (const s of seasons) seasonSet.add(s.seasonNumber);
@@ -319,6 +332,8 @@ export const onRequest = async (context: any) => {
           const folder = `${rootName}/${seasonFolderName(sn)}`;
           const sObj = seasons.find((x) => x.seasonNumber === sn) || { seasonNumber: sn, title: `Season ${sn}`, plot: "" };
           files[`${folder}/season.nfo`] = textFile(buildSeasonNfo(sObj));
+          const customSeasonPoster = customImages?.seasons?.[String(sn)]?.dataUrl;
+          if (customSeasonPoster) files[`${folder}/poster.jpg`] = dataUrlToUint8(customSeasonPoster);
 
           const eps = episodes
             .filter((x) => x.seasonNumber === sn)
@@ -443,6 +458,25 @@ export const onRequest = async (context: any) => {
           files[`${rootName}/rename/rename_preview.txt`] = textFile(preview.join("\n"));
         }
 
+        const fileCount = Object.keys(files).length;
+        if (uploadTarget) {
+          send("progress", { step: `上传(${uploadTarget})`, current: 0, total: fileCount, message: uploadPath || "/" });
+          await uploadFileMap(env, uploadTarget, uploadPath || "/", files, (i, total, path) =>
+            send("progress", { step: `上传(${uploadTarget})`, current: i, total, message: path })
+          );
+          if (!zipAfterUpload) {
+            send("done", { uploaded: uploadTarget, path: uploadPath || "/" });
+            controller.close();
+            return;
+          }
+        }
+
+        if (!zipAfterUpload) {
+          send("done", {});
+          controller.close();
+          return;
+        }
+
         // 6) 打包 zip + 存 R2 + 返回下载
         send("progress", { step: "打包", current: 0, total: 0, message: "生成 zip…" });
         const zip = makeZip(files);
@@ -452,7 +486,7 @@ export const onRequest = async (context: any) => {
 
         if (!env.META_BUCKET) {
           throw new Error(
-            "R2 未绑定：请在 Pages -> Settings -> Bindings 绑定 R2 Bucket 到变量名 META_BUCKET（Production 环境也要绑）。"
+            "R2 未绑定：请在 Pages -> Settings -> Bindings 绑定 R2 Bucket 到变量名 META_BUCKET（Production 环境也要绑）"
           );
         }
 
@@ -461,7 +495,7 @@ export const onRequest = async (context: any) => {
         const downloadUrl = new URL("/api/download", new URL(context.request.url).origin);
         downloadUrl.searchParams.set("key", key);
 
-        send("done", { downloadUrl: downloadUrl.toString() });
+        send("done", { downloadUrl: downloadUrl.toString(), uploaded: uploadTarget || undefined, path: uploadPath || "/" });
         controller.close();
       } catch (e: any) {
         fail(e?.message || String(e));
@@ -477,6 +511,15 @@ export const onRequest = async (context: any) => {
     }
   });
 };
+
+function dataUrlToUint8(dataUrl: string) {
+  const m = dataUrl.match(/^data:.*?;base64,(.*)$/);
+  const b64 = m ? m[1] : dataUrl;
+  const binary = atob(b64);
+  const buf = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+  return buf;
+}
 
 function encodeSSE(event: string, data: any) {
   return new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);

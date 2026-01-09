@@ -14,4 +14,18 @@ export type Env = {
 
   FETCH_CONCURRENCY?: string;
   FETCH_DELAY_MS?: string;
+
+  // Upload targets
+  OPENLIST_ENABLED?: string;
+  OPENLIST_BASE?: string;
+  OPENLIST_TOKEN?: string;
+  OPENLIST_USERNAME?: string;
+  OPENLIST_PASSWORD?: string;
+
+  RCLONE_ENABLED?: string;
+  RCLONE_RC_URL?: string;
+  RCLONE_RC_USER?: string;
+  RCLONE_RC_PASS?: string;
+  RCLONE_FS?: string;
+  RCLONE_BASE_DIR?: string;
 };

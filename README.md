@@ -7,37 +7,32 @@
 ![Jellyfin](https://img.shields.io/badge/Jellyfin-Compatible-00A4DC)
 ![License](https://img.shields.io/github/license/Zzzwannasleep/emby-meta-tool)
 
-一款 **完全基于 Cloudflare Pages + Workers + KV + R2 的网页端 Emby 元数据生成工具**。  
-支持 **TMDB / Bangumi / AniDB / 纯手动模式**，可生成 **Emby 可识别的 NFO + 图片结构**，并支持 **MoviePilot 风格的文件重命名映射**。
+一款 **Cloudflare Pages + Workers + KV + R2** 的网页端 Emby/Jellyfin 元数据生成工具。  
+支持 TMDB / Bangumi / AniDB / 纯手动模式，生成 Emby 可识别的 **NFO + 图片目录结构**，内置 MoviePilot 风格重命名映射。  
+现在还支持 **直接上传到 OpenList / Rclone**，并提供 **2:3 TMDB 比例海报/季封面裁剪器**。
 
-> ✨ 无需 wrangler / 无需本地 CLI  
-> ✨ 所有操作均在网页端完成  
-> ✨ 适合 Emby / Jellyfin / NAS 用户使用
-
----
-
-## ✨ 核心特性
-
-- ✅ 完全网页端操作（Cloudflare Pages）
-- ✅ TMDB / Bangumi / AniDB 元数据抓取
-- ✅ TMDB Episode Groups（剧集组）可视化选择
-- ✅ 支持 AI 自动补全缺失字段（可选）
-- ✅ 支持 **纯手动模式**（无任何外部 API）
-- ✅ 支持 **手动定义季 / 集结构**
-- ✅ 生成 **标准 Emby 元数据目录结构**
-- ✅ MoviePilot 风格重命名（生成 rename 映射文件）
-- ✅ 自动解析原始文件名中的 SxxEyy / 1x02 / 第X集
-- ✅ 支持生成 **标准 SxxEyy.nfo**
-- ✅ 可选生成 **与媒体文件同名的 NFO（双写模式，更方便整理库）**
+> ✅ 无需 wrangler / 无需本地 CLI  
+> ✅ 所有操作都在网页完成  
+> ✅ 适合 Emby / Jellyfin / NAS 用户
 
 ---
 
-## 📦 生成内容说明
+## ✅ 核心特性
+- 纯网页端操作（Cloudflare Pages）
+- TMDB / Bangumi / AniDB 抓取，支持剧集组 Episode Groups
+- AI 自动补全缺失字段（可选）
+- 手动模式：自定义季/集结构与元信息
+- 生成标准 Emby 元数据目录结构
+- MoviePilot 风格重命名映射（rename_map.csv）
+- 自动解析原始文件名中的 SxxEyy / 1x02 / 第X集
+- 标准 SxxEyy.nfo & 同名 NFO（双写可选）
+- **一键上传元数据到 OpenList / Rclone 远端（无需再下 ZIP）**
+- **内置 2:3 海报/季封面裁剪，裁好直接写入生成目录/上传**
 
-生成的 ZIP 文件包含：
+---
 
+## 📦 生成内容
 ```
-
 Show Name (Year)/
 ├─ tvshow.nfo
 ├─ poster.jpg
@@ -45,371 +40,89 @@ Show Name (Year)/
 ├─ Season 01/
 │  ├─ season.nfo
 │  ├─ S01E01.nfo
-│  ├─ S01E02.nfo
 │  └─ ...
 └─ rename/
-├─ rename_map.csv
-└─ rename_preview.txt
-
+   ├─ rename_map.csv
+   └─ rename_preview.txt
 ```
 
-> ⚠️ **注意**
->
-> - Emby 对 NFO 文件名有严格要求  
-> - 本工具 **不会直接重命名媒体文件**  
-> - 而是生成 **重命名映射文件（rename_map.csv）**，用于 MoviePilot / 批量重命名工具
+> ⚠️ 注意  
+> - 不会改动/重命名你的媒体文件；仅生成映射。  
+> - 开启“上传”时，目录会直接推到远端；若要同时保留 ZIP，在请求体加 `zipAfterUpload=true`。
+
+---
+
+## ☁️ 直接上传到 OpenList / Rclone
+1) 前端点击 “上传至 OpenList / Rclone”。  
+2) 弹窗里浏览远端目录（调用 `/api/upload-list`），选择目标路径。  
+3) 确认后生成并直接上传，SSE 显示进度；默认不打包 ZIP。
+
+### 环境变量
+**OpenList**
+```
+OPENLIST_ENABLED=1
+OPENLIST_BASE=https://fox.oplist.org        # 你的基址
+OPENLIST_TOKEN=...                          # 二选一：token
+# 或
+OPENLIST_USERNAME=...                       # 二选一：账号密码
+OPENLIST_PASSWORD=...
+```
+
+**Rclone RC**
+```
+RCLONE_ENABLED=1
+RCLONE_RC_URL=http://127.0.0.1:5572         # rclone rc --rc-addr
+RCLONE_FS=remote:emby-meta                  # rclone 配置的 fs 名
+RCLONE_BASE_DIR=/meta                       # 可选，远端基础目录
+RCLONE_RC_USER=...                          # 若 rc 开 auth
+RCLONE_RC_PASS=...
+```
+行为说明：`uploadTarget=openlist|rclone` 时直接上传；若想同时保存 ZIP，附带 `zipAfterUpload=true`。
+
+---
+
+## 🎨 海报 / 季封面裁剪
+- 固定 2:3（TMDB 标准），支持主海报与季封面。
+- 选择图片 → 调整缩放/水平/垂直滑块 → Canvas 实时预览。
+- 导出 JPEG 写入目录：`poster.jpg`、`Season XX/poster.jpg`，并参与上传/打包。
 
 ---
 
 ## 🚀 在线部署（Cloudflare Pages）
+> Cloudflare Pages 目前没有“Deploy with Workers”一键按钮，但按以下步骤 2~3 分钟即可完成。
 
-> 本项目为 **Cloudflare Pages + Pages Functions** 架构  
-> Cloudflare 官方目前 **不支持 Pages 的真正“一键 Deploy 按钮”**（仅 Workers 支持）  
-> 但按以下步骤，**2~3 分钟即可完成完整部署**
+### 前置
+- GitHub 账号  
+- Cloudflare 账号  
+- Cloudflare R2 Bucket（存放生成的 ZIP）  
+- Cloudflare KV Namespace（缓存/索引）
 
-### 👉 快速入口
-
-[![Deploy to Cloudflare Pages](https://img.shields.io/badge/Deploy-Cloudflare%20Pages-F38020?logo=cloudflare&logoColor=white)](https://dash.cloudflare.com/)
-
----
-
-### 前置条件
-
-- GitHub 账号
-- Cloudflare 账号
-- Cloudflare R2 Bucket（用于存放生成的 ZIP）
-- Cloudflare KV Namespace（用于缓存 / 索引）
-
----
-
-### 部署步骤（纯网页端，无 CLI）
-
-1. Fork 本仓库到你自己的 GitHub
-2. 打开 Cloudflare Dashboard → **Pages** → **Create a project**
-3. 选择你 Fork 的仓库
-4. 填写构建参数：
-
-   | 项目 | 值 |
+### 步骤
+1. Fork 本仓库到你的 GitHub  
+2. Cloudflare Dashboard → Pages → Create a project → 选择 Fork  
+3. 构建参数  
+   | 项 | 值 |
    |---|---|
    | Root directory | `emby-meta-tool` |
    | Build command | `npm run build` |
    | Output directory | `dist` |
+4. 点击 Deploy
 
-5. 点击 **Deploy**
-
----
-
-### 必须的 Bindings（非常重要）
-
-在 Pages → **Settings → Bindings** 中配置以下内容：
-
-#### R2 Bucket（必需）
-| 类型 | 值 |
-|---|---|
-| Variable name | `META_BUCKET` |
-| Bucket | 你创建的 R2 Bucket |
-
-#### KV Namespace（必需）
-| 类型 | 值 |
-|---|---|
-| Variable name | `META_KV` |
-| Namespace | 你创建的 KV |
-
-> ⚠️ **Production 环境必须配置，否则生成阶段会直接失败**
+### 必选 Bindings（Pages → Settings → Bindings）
+- R2 Bucket：`META_BUCKET`
+- KV Namespace：`META_KV`
+> 生产环境也要配置，否则生成会失败。
 
 ---
 
-### 部署完成后
-
-- 打开 Pages 提供的访问地址
-- 所有功能 **直接在网页端完成**
-- 无需 wrangler / 无需本地 Node / 无需 CLI
-
----
-
-## 🔑 API Key & 环境变量配置（非常重要）
-
-本项目部分数据源需要 API Key 才能正常工作，请在 Cloudflare Pages 中正确配置。
-
-### ✅ TMDB（必需）
-
-本工具使用 **官方 TMDB API**，必须提供 API Key。
-
-#### 获取方式
-
-1. 注册 / 登录 https://www.themoviedb.org
-2. 进入账号设置 → API
-3. 创建 API Key（v4 Token（短的那条））
-
-#### Cloudflare Pages 配置
-
-在 **Pages → Settings → Environment Variables** 中添加：
-
-| 名称 | 值 |
-|----|----|
-| `TMDB_API_KEY` | 你的 TMDB API Key |
-
-> 建议添加到 **Production** 和 **Preview** 环境
-
-#### 未配置会发生什么？
-
-- TMDB 搜索失败
-- 剧集组（Episode Groups）无法加载
-- 图片下载失败
-- 页面只会提示“检索失败”
-
-### ℹ️ AniDB（当前版本不需要 Client ID）
-
-> ⚠️ 重要说明
-
-当前版本 **未直接使用官方 AniDB UDP API**，而是采用：
-- 公共索引数据
-- + 手动填写 / AI 补全兜底
-
-因此：
-
-- ❌ **不需要 AniDB clientId**
-- ❌ 不需要 client name / version
-- ✅ 可直接使用
-
-> 后续如果改为 **官方 AniDB API 模式**，才会引入 clientId / 限速 / 登录等配置。
-
-### ℹ️ Bangumi
-
-- 使用 Bangumi 公共 API
-- 当前版本 **不强制要求 Access Token**
-- 可能存在公共速率限制，但对一般使用足够
-
----
-
-### 🤖 AI 自动补全（可选）
-
-若启用 AI 自动补全功能，需要配置 AI 接口。
-
-#### 示例（OpenAI / 兼容接口）
-
-| 名称 | 说明 |
-|----|----|
-| `AI_API_KEY` | API Key |
-| `AI_API_BASE` | API Base URL（可选） |
-| `AI_MODEL` | 模型名（如 gpt-4o-mini） |
-
-> 未配置 AI 不影响其他功能。
-
----
-
-### 📦 Cloudflare Bindings（再次确认）
-
-以下绑定 **必须存在**，否则生成阶段会失败：
-
-#### R2 Bucket
-| 变量名 | 说明 |
-|----|----|
-| `META_BUCKET` | 存放生成的 ZIP 文件 |
-
-#### KV Namespace
-| 变量名 | 说明 |
-|----|----|
-| `META_KV` | 缓存 / 索引数据 |
-
-⚠️ **Production 环境也必须配置**
-
----
-
-
-## 🧪 使用指南
-
-### 1️⃣ 普通刮削（推荐）
-
-1. 选择数据源（TMDB / Bangumi / AniDB）
-2. 输入标题（或 ID）
-3. **直接点击「一键生成并打包下载」**
-4. 工具会：
-   - 自动检索
-   - 自动选择最匹配条目
-   - 自动生成 ZIP
-
----
-
-### 2️⃣ TMDB 剧集组（Episode Groups）
-
-1. 数据源选择 TMDB
-2. 搜索并选择 TV 条目
-3. 点击「查剧集组」
-4. 从列表中选择一个剧集组
-5. 再点击「一键生成」
-
----
-
-### 3️⃣ 纯手动模式（不依赖任何 API）
-
-适合以下情况：
-
-- 无码番 / 冷门资源
-- 私人拍摄内容
-- 无法被 TMDB / Bangumi 收录的作品
-
-#### 使用方法
-
-1. 数据源选择 **manual**
-2. 手动填写：
-   - 标题
-   - 年份 / 简介（可选）
-3. 填写季 / 集结构
-4. 点击生成
-
----
-
-## 🧩 手动季 / 集结构说明
-
-支持两种方式：
-
-### 统一每季集数
-```
-
-总季数：3
-每季集数：12
-
-```
-
-### 指定每季集数映射
-```
-
-1:12,2:10,3:8
-
-```
-
-### 集标题模板（可选）
-```
-
-Episode {{ episode }}
-{{ season_episode }}
-第 {{ episode }} 集
-
+## 🧰 开发
+```bash
+pnpm install   # 或 npm install
+npm run dev
+npm run build
 ```
 
 ---
 
-## 🪄 重命名功能（MoviePilot 风格）
-
-### NFO 命名模式（可选）
-
-- `standard`：仅生成 `S01E01.nfo`（最稳，Emby 官方推荐）
-- `same_as_media`：仅生成与媒体文件同名的 `.nfo`
-- `both`（默认）：**两种同时生成（推荐）**
-
-### 输入内容
-
-在「原始文件名列表」中粘贴：
-
-```
-
-My.Show.S01E01.1080p.mkv
-My.Show.1x02.WEB-DL.mp4
-我的剧 第03集.mkv
-
-```
-
----
-
-### 输出文件
-
-生成 ZIP 中会包含：
-
-```
-
-rename/rename_map.csv
-rename/rename_preview.txt
-
-````
-
-### 示例 rename_map.csv
-
-```csv
-original,new
-My.Show.S01E01.1080p.mkv,My Show/Season 01/My Show - S01E01.mkv
-````
-
----
-
-## 🔍 自动解析规则（已支持）
-
-工具会自动从原始文件名中解析：
-
-* `S01E02`
-* `1x02`
-* `第1季第2集`
-* `第02集`
-* `EP02 / E02`
-
-若无法解析，将自动按顺序回退匹配，**保证不会生成失败**。
-
----
-
-## 🧠 AI 自动补全（可选）
-
-* 通过环境变量配置 AI（OpenAI / 兼容 API）
-* 用于补全：
-
-  * 简介
-  * 原名
-  * 类型
-  * 演员等
-
-> 若未配置 AI，不影响其他功能。
-
----
-
-## 📁 项目结构说明
-
-```
-emby-meta-tool/
-├─ src/                # 前端 UI（Material Design v3）
-├─ functions/          # Cloudflare Pages Functions
-│  └─ api/
-│     ├─ generate.ts   # 核心生成逻辑
-│     ├─ search.ts
-│     └─ ...
-├─ shared/
-│  ├─ emby.ts          # Emby NFO 生成
-│  ├─ rename.ts        # 重命名解析 & 模板
-│  ├─ tmdb.ts
-│  └─ bangumi.ts
-└─ README / docs
-```
-
----
-
-## ❓ 常见问题（FAQ）
-
-### Q：为什么不直接重命名媒体文件？
-
-A：浏览器无法安全访问本地媒体文件，本工具生成 **映射表**，由 MoviePilot / 批量重命名工具执行。
-
-### Q：NFO 文件名能完全自定义吗？
-
-A：不能完全自定义。  
-Emby 对元数据文件名有硬性规范（如 `tvshow.nfo / season.nfo / SxxEyy.nfo`），
-本工具在保证兼容性的前提下，**支持额外生成与媒体文件同名的 NFO（双写模式）**。
-
-### Q：可以支持 Jellyfin 吗？
-
-A：目录结构与 Jellyfin 高度兼容，理论可用。
-
----
-
-## 🤝 贡献指南
-
-欢迎 PR / Issue！
-
-建议方向：
-
-* 新数据源支持
-* 重命名模板增强
-* UI / UX 优化
-* 文档补充
-
-## 📄 License
-
-MIT License
-
+## 📜 License
+MIT

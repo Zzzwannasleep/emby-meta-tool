@@ -76,6 +76,27 @@ type ManualEpisodeMeta = {
   aired: string;
 };
 
+type UploadTarget = "openlist" | "rclone";
+
+type UploadListItem = {
+  name: string;
+  type: "dir" | "file";
+};
+
+type UploadState = {
+  enabled: { openlist: boolean; rclone: boolean };
+  dialog: { visible: boolean; target: UploadTarget | null; path: string; items: UploadListItem[]; busy: boolean; message: string };
+};
+
+type CropImageState = {
+  dataUrl: string;
+  zoom: number;
+  offsetX: number;
+  offsetY: number;
+  img?: HTMLImageElement;
+  outputDataUrl?: string;
+};
+
 type State = {
   source: SourceType;
   mediaType: MediaType;
@@ -106,6 +127,16 @@ type State = {
   busy: boolean;
   status: string;
   logs: string[];
+
+  // upload
+  upload: UploadState;
+
+  // crop
+  crop: {
+    poster?: CropImageState;
+    season?: CropImageState;
+    seasonNumber: number;
+  };
 };
 
 const state: State = {
@@ -165,7 +196,18 @@ const state: State = {
 
   busy: false,
   status: "",
-  logs: []
+  logs: [],
+
+  upload: {
+    enabled: { openlist: false, rclone: false },
+    dialog: { visible: false, target: null, path: "/", items: [], busy: false, message: "" }
+  },
+
+  crop: {
+    poster: undefined,
+    season: undefined,
+    seasonNumber: 1
+  }
 };
 
 function $(id: string) {
@@ -203,6 +245,7 @@ function setBusy(v: boolean, status?: string) {
   (btnGroups as any).disabled = v;
 
   renderStatus();
+  renderUploadButtons();
 }
 
 function log(line: string) {
@@ -404,6 +447,92 @@ function autoFillOriginalsFromFirstLine(): string {
   return out.join("\n");
 }
 
+async function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function loadCropImage(crop: CropImageState) {
+  if (crop.img) return crop.img;
+  const img = new Image();
+  img.src = crop.dataUrl;
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = reject;
+  });
+  crop.img = img;
+  return img;
+}
+
+function drawImageWithCrop(ctx: CanvasRenderingContext2D, img: HTMLImageElement, crop: CropImageState, w: number, h: number) {
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#f3f3f3";
+  ctx.fillRect(0, 0, w, h);
+
+  const baseScale = Math.max(w / img.width, h / img.height);
+  const scale = baseScale * (crop.zoom || 1);
+  const drawW = img.width * scale;
+  const drawH = img.height * scale;
+  const dx = (w - drawW) / 2 + (crop.offsetX || 0) * (w / 2);
+  const dy = (h - drawH) / 2 + (crop.offsetY || 0) * (h / 2);
+
+  ctx.drawImage(img, dx, dy, drawW, drawH);
+}
+
+async function exportCropData(crop: CropImageState) {
+  const img = await loadCropImage(crop);
+  const canvas = document.createElement("canvas");
+  canvas.width = 1000;
+  canvas.height = 1500; // 2:3
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("canvas unsupported");
+  drawImageWithCrop(ctx, img, crop, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.9);
+}
+
+async function renderCropPreview(target: "poster" | "season") {
+  const crop = target === "poster" ? state.crop.poster : state.crop.season;
+  const canvasId = target === "poster" ? "posterCanvas" : "seasonCanvas";
+  const canvas = document.getElementById(canvasId) as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  ctx.fillStyle = "#f6f6f6";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#666";
+  ctx.font = "12px sans-serif";
+
+  if (!crop?.dataUrl) {
+    ctx.fillText("未选择图片", 12, 20);
+    return;
+  }
+
+  const img = await loadCropImage(crop);
+  drawImageWithCrop(ctx, img, crop, canvas.width, canvas.height);
+  crop.outputDataUrl = await exportCropData(crop);
+}
+
+async function handleCropFile(target: "poster" | "season", file: File | null | undefined) {
+  if (!file) return;
+  const dataUrl = await readFileAsDataUrl(file);
+  const crop: CropImageState = { dataUrl, zoom: 1, offsetX: 0, offsetY: 0 };
+  if (target === "poster") state.crop.poster = crop;
+  else state.crop.season = crop;
+  await renderCropPreview(target);
+}
+
+function updateCropValue(target: "poster" | "season", key: "zoom" | "offsetX" | "offsetY", value: number) {
+  const crop = target === "poster" ? state.crop.poster : state.crop.season;
+  if (!crop) return;
+  (crop as any)[key] = value;
+  void renderCropPreview(target);
+}
+
 /** ---------------------------
  * API 调用（如参数不一致，只需改这 2-3 个函数）
  * --------------------------*/
@@ -510,6 +639,31 @@ async function apiPreview() {
   return data;
 }
 
+async function fetchUploadConfig() {
+  try {
+    const res = await fetch("/api/upload-config");
+    const data = await res.json().catch(() => ({}));
+    state.upload.enabled.openlist = !!data?.openlist?.enabled;
+    state.upload.enabled.rclone = !!data?.rclone?.enabled;
+    renderUploadButtons();
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function apiUploadList(target: UploadTarget, path: string) {
+  const res = await fetch("/api/upload-list", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ target, path })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `list failed: ${res.status}`);
+  return data as { path: string; items: UploadListItem[] };
+}
+
+
+
 function buildGeneratePayload() {
   // 后端 generate.ts 预期字段（你现在 generate.ts 如果名字不同，改这里）
   const manualEp = normalizeManualEpisode();
@@ -559,14 +713,23 @@ function buildGeneratePayload() {
     }
   };
 
+  const customImages: any = {};
+  if (state.crop.poster?.outputDataUrl) customImages.poster = { dataUrl: state.crop.poster.outputDataUrl };
+  if (state.crop.season?.outputDataUrl) {
+    const sn = Number(state.crop.seasonNumber || 1) || 1;
+    customImages.seasons = { [String(sn)]: { dataUrl: state.crop.season.outputDataUrl } };
+  }
+  if (Object.keys(customImages).length) payload.customImages = customImages;
+
   // manual source 时允许 id 为空
   if (payload.source === "manual") payload.id = null;
 
   return payload;
 }
 
-async function startGenerateAndDownload() {
+async function startGenerateAndDownload(options?: { uploadTarget?: UploadTarget; uploadPath?: string; zipAfterUpload?: boolean }) {
   const payload = buildGeneratePayload();
+  if (options) Object.assign(payload, options);
 
   const res = await fetch("/api/generate", {
     method: "POST",
@@ -620,10 +783,16 @@ async function startGenerateAndDownload() {
         setProgressText(msg);
       } else if (ev === "done") {
         const url = data?.downloadUrl;
+        const uploaded = data?.uploaded;
+        const path = data?.path;
         if (url) {
           log("生成完成，开始下载 ZIP…");
           window.location.href = url;
           setProgressText("完成 ✅（已触发下载）");
+        } else if (uploaded) {
+          const msg = `完成 ✅（已上传到 ${uploaded}${path ? `: ${path}` : ""}）`;
+          setProgressText(msg);
+          log(msg);
         } else {
           setProgressText("完成 ✅");
         }
@@ -719,6 +888,122 @@ function renderPreview(rows: any[]) {
     })
     .join("");
 }
+function joinRemotePath(base: string, name: string) {
+  const root = (base || "/").replace(/\\+/g, "/");
+  const trimmed = root.replace(/\/+$/, "") || "/";
+  const segment = (name || "").replace(/\\+/g, "/").replace(/^\/+/, "");
+  return (trimmed === "/" ? "/" : trimmed + "/") + segment;
+}
+
+function renderUploadButtons() {
+  const btnOp = document.getElementById("btnUploadOpenlist") as HTMLButtonElement | null;
+  if (btnOp) (btnOp as any).disabled = !state.upload.enabled.openlist || state.busy;
+  const btnRc = document.getElementById("btnUploadRclone") as HTMLButtonElement | null;
+  if (btnRc) (btnRc as any).disabled = !state.upload.enabled.rclone || state.busy;
+  const hint = document.getElementById("uploadConfigHint");
+  if (hint) {
+    if (state.upload.enabled.openlist || state.upload.enabled.rclone) {
+      hint.textContent = "选择目标后会先弹出目录预览，再上传元数据。";
+    } else {
+      hint.textContent = "未检测到上传配置，请在环境变量中开启并填写凭据。";
+    }
+  }
+}
+
+function renderUploadDialog() {
+  const modal = document.getElementById("uploadDialog") as HTMLElement | null;
+  if (!modal) return;
+  modal.style.display = state.upload.dialog.visible ? "flex" : "none";
+  if (!state.upload.dialog.visible) return;
+
+  const title = document.getElementById("uploadTargetLabel");
+  if (title) title.textContent = state.upload.dialog.target || "";
+  const pathInput = document.getElementById("uploadPath") as HTMLInputElement | null;
+  if (pathInput) pathInput.value = state.upload.dialog.path || "/";
+
+  const list = document.getElementById("uploadList") as HTMLElement | null;
+  if (list) {
+    if (state.upload.dialog.busy) {
+      list.innerHTML = `<div class="muted">加载中…</div>`;
+    } else if (!state.upload.dialog.items.length) {
+      list.innerHTML = `<div class="muted">空目录</div>`;
+    } else {
+      list.innerHTML = state.upload.dialog.items
+        .map((it) => `<div class="result-item upload-item" data-type="${it.type}" data-name="${escapeHtml(it.name)}">${escapeHtml(it.name)}${it.type === "dir" ? " /" : ""}</div>`)
+        .join("");
+      list.querySelectorAll<HTMLElement>('[data-type="dir"]').forEach((node) => {
+        node.addEventListener("click", () => {
+          const name = node.dataset.name || "";
+          const next = joinRemotePath(state.upload.dialog.path, name);
+          refreshUploadList(next);
+        });
+      });
+    }
+  }
+
+  const msg = document.getElementById("uploadDialogMsg");
+  if (msg) msg.textContent = state.upload.dialog.message || "";
+}
+
+async function refreshUploadList(path?: string) {
+  if (typeof path === "string") state.upload.dialog.path = path;
+  const dlg = state.upload.dialog;
+  if (!dlg.target) return;
+  dlg.busy = true;
+  renderUploadDialog();
+  try {
+    const data = await apiUploadList(dlg.target, dlg.path || "/");
+    dlg.path = data.path || dlg.path;
+    dlg.items = data.items || [];
+    dlg.message = "";
+  } catch (e: any) {
+    dlg.message = e?.message || String(e);
+  }
+  dlg.busy = false;
+  renderUploadDialog();
+}
+
+async function openUploadDialog(target: UploadTarget) {
+  if (!state.upload.enabled[target]) {
+    log(`上传目标 ${target} 未启用`);
+    return;
+  }
+  state.upload.dialog.target = target;
+  state.upload.dialog.visible = true;
+  state.upload.dialog.items = [];
+  state.upload.dialog.message = "";
+  state.upload.dialog.busy = false;
+  if (!state.upload.dialog.path) state.upload.dialog.path = "/";
+  renderUploadDialog();
+  await refreshUploadList(state.upload.dialog.path);
+}
+
+function closeUploadDialog() {
+  state.upload.dialog.visible = false;
+  renderUploadDialog();
+}
+
+async function confirmUpload() {
+  const dlg = state.upload.dialog;
+  if (!dlg.target) return;
+  if (state.source !== "manual") {
+    const id = state.selected?.id || (state.idInput || "").trim();
+    if (!id) {
+      log("请先搜索并选择一个条目，或输入 ID");
+      return;
+    }
+  }
+  closeUploadDialog();
+  try {
+    setBusy(true, `上传到 ${dlg.target}…`);
+    await startGenerateAndDownload({ uploadTarget: dlg.target, uploadPath: dlg.path || "/", zipAfterUpload: false });
+    setBusy(false, "完成 ✅");
+  } catch (e: any) {
+    setBusy(false, "上传失败");
+    log(`上传失败：${e?.message || String(e)}`);
+  }
+}
+
 
 function render() {
   // 赋值表单
@@ -771,6 +1056,8 @@ function render() {
   renderEpisodeGroups();
   renderStatus();
   renderLogs();
+  renderUploadButtons();
+  renderUploadDialog();
 
   // 根据 source 显示/隐藏某些区域
   const manualBox = $("manualBox");
@@ -864,6 +1151,43 @@ function bind() {
   $("customization").addEventListener("input", (e) => (state.rename.customization = (e.target as HTMLInputElement).value));
   $("originals").addEventListener("input", (e) => (state.rename.originalsText = (e.target as HTMLTextAreaElement).value));
   $("nfoMode").addEventListener("change", (e) => (state.rename.nfoNameMode = (e.target as HTMLSelectElement).value as NfoNameMode));
+
+
+  // crop
+  const posterFile = document.getElementById("posterFile") as HTMLInputElement | null;
+  if (posterFile) posterFile.addEventListener("change", (e) => void handleCropFile("poster", (e.target as HTMLInputElement).files?.[0]));
+  const posterZoom = document.getElementById("posterZoom") as HTMLInputElement | null;
+  if (posterZoom) posterZoom.addEventListener("input", (e) => updateCropValue("poster", "zoom", Number((e.target as HTMLInputElement).value || 1)));
+  const posterOffsetX = document.getElementById("posterOffsetX") as HTMLInputElement | null;
+  if (posterOffsetX) posterOffsetX.addEventListener("input", (e) => updateCropValue("poster", "offsetX", Number((e.target as HTMLInputElement).value || 0)));
+  const posterOffsetY = document.getElementById("posterOffsetY") as HTMLInputElement | null;
+  if (posterOffsetY) posterOffsetY.addEventListener("input", (e) => updateCropValue("poster", "offsetY", Number((e.target as HTMLInputElement).value || 0)));
+
+  const seasonFile = document.getElementById("seasonFile") as HTMLInputElement | null;
+  if (seasonFile) seasonFile.addEventListener("change", (e) => void handleCropFile("season", (e.target as HTMLInputElement).files?.[0]));
+  const seasonZoom = document.getElementById("seasonZoom") as HTMLInputElement | null;
+  if (seasonZoom) seasonZoom.addEventListener("input", (e) => updateCropValue("season", "zoom", Number((e.target as HTMLInputElement).value || 1)));
+  const seasonOffsetX = document.getElementById("seasonOffsetX") as HTMLInputElement | null;
+  if (seasonOffsetX) seasonOffsetX.addEventListener("input", (e) => updateCropValue("season", "offsetX", Number((e.target as HTMLInputElement).value || 0)));
+  const seasonOffsetY = document.getElementById("seasonOffsetY") as HTMLInputElement | null;
+  if (seasonOffsetY) seasonOffsetY.addEventListener("input", (e) => updateCropValue("season", "offsetY", Number((e.target as HTMLInputElement).value || 0)));
+  const seasonNumberInput = document.getElementById("seasonNumberInput") as HTMLInputElement | null;
+  if (seasonNumberInput)
+    seasonNumberInput.addEventListener("input", (e) => (state.crop.seasonNumber = Number((e.target as HTMLInputElement).value || 1)));
+
+  // upload
+  const btnUploadOp = document.getElementById("btnUploadOpenlist") as HTMLButtonElement | null;
+  if (btnUploadOp) btnUploadOp.addEventListener("click", () => void openUploadDialog("openlist"));
+  const btnUploadRc = document.getElementById("btnUploadRclone") as HTMLButtonElement | null;
+  if (btnUploadRc) btnUploadRc.addEventListener("click", () => void openUploadDialog("rclone"));
+  const uploadPathInput = document.getElementById("uploadPath") as HTMLInputElement | null;
+  if (uploadPathInput) uploadPathInput.addEventListener("input", (e) => (state.upload.dialog.path = (e.target as HTMLInputElement).value));
+  const btnUploadRefresh = document.getElementById("btnUploadRefresh") as HTMLButtonElement | null;
+  if (btnUploadRefresh) btnUploadRefresh.addEventListener("click", () => void refreshUploadList(state.upload.dialog.path || "/"));
+  const btnUploadCancel = document.getElementById("btnUploadCancel") as HTMLButtonElement | null;
+  if (btnUploadCancel) btnUploadCancel.addEventListener("click", () => closeUploadDialog());
+  const btnUploadConfirm = document.getElementById("btnUploadConfirm") as HTMLButtonElement | null;
+  if (btnUploadConfirm) btnUploadConfirm.addEventListener("click", () => void confirmUpload());
 
   // 搜索
   $("btnSearch").addEventListener("click", async () => {
@@ -1164,7 +1488,63 @@ function injectSkeleton() {
       </div>
 
       <div class="card">
-        <div class="card-title">5) 一键生成并下载</div>
+        <div class="card-title">5) 封面裁剪（可选）</div>
+        <div class="muted">按 TMDB 海报 2:3 比例裁剪，支持主海报与季封面。</div>
+        <div class="row crop-row">
+          <div class="crop-panel">
+            <div class="label">主海报</div>
+            <input id="posterFile" type="file" accept="image/*" />
+            <div class="row crop-sliders">
+              <label class="label">缩放</label><input id="posterZoom" type="range" min="1" max="3" step="0.05" value="1" />
+              <label class="label">水平</label><input id="posterOffsetX" type="range" min="-1" max="1" step="0.02" value="0" />
+              <label class="label">垂直</label><input id="posterOffsetY" type="range" min="-1" max="1" step="0.02" value="0" />
+            </div>
+            <canvas id="posterCanvas" width="220" height="330" class="crop-canvas"></canvas>
+          </div>
+          <div class="crop-panel">
+            <div class="label">季封面</div>
+            <div class="row">
+              <input id="seasonNumberInput" class="input" style="width:120px" value="1" placeholder="季号" />
+              <input id="seasonFile" type="file" accept="image/*" />
+            </div>
+            <div class="row crop-sliders">
+              <label class="label">缩放</label><input id="seasonZoom" type="range" min="1" max="3" step="0.05" value="1" />
+              <label class="label">水平</label><input id="seasonOffsetX" type="range" min="-1" max="1" step="0.02" value="0" />
+              <label class="label">垂直</label><input id="seasonOffsetY" type="range" min="-1" max="1" step="0.02" value="0" />
+            </div>
+            <canvas id="seasonCanvas" width="220" height="330" class="crop-canvas"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">6) 上传到 OpenList / Rclone（可选）</div>
+        <div class="row">
+          <button id="btnUploadOpenlist" class="btn">上传至 OpenList</button>
+          <button id="btnUploadRclone" class="btn">上传至 Rclone</button>
+          <div class="muted">生成后直接推送元数据到远端目录（不打包 ZIP）。</div>
+        </div>
+        <div class="muted" id="uploadConfigHint">正在检测上传配置…</div>
+      </div>
+
+      <div id="uploadDialog" class="modal">
+        <div class="modal-content">
+          <div class="modal-title">选择上传目录：<span id="uploadTargetLabel"></span></div>
+          <div class="row">
+            <input id="uploadPath" class="input flex" placeholder="/目标目录" />
+            <button id="btnUploadRefresh" class="btn">刷新</button>
+          </div>
+          <div id="uploadList" class="results" style="max-height:240px;overflow:auto;"></div>
+          <div class="row">
+            <button id="btnUploadConfirm" class="btn primary">确认上传</button>
+            <button id="btnUploadCancel" class="btn">取消</button>
+          </div>
+          <div class="muted" id="uploadDialogMsg"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">7) 一键生成并下载</div>
         <div class="row">
           <button id="btnGenerate" class="btn primary">生成并打包下载</button>
           <div class="muted">点一次即可（会显示进度并自动触发 ZIP 下载）</div>
@@ -1207,6 +1587,15 @@ function injectSkeleton() {
   .result-item.active{border-color:#1f6feb;background:rgba(31,111,235,.06);}
   .logs{white-space:pre-wrap;word-break:break-word;border:1px solid rgba(0,0,0,.18);border-radius:12px;padding:10px;background:rgba(0,0,0,.03);min-height:120px;max-height:360px;overflow:auto;}
   .checkbox{display:flex;gap:10px;align-items:center;cursor:pointer;}
+  .crop-canvas{border:1px solid rgba(0,0,0,.12);border-radius:12px;background:#fafafa;margin-top:8px;}
+  .crop-panel{border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:10px;background:#fff;}
+  .crop-row{gap:14px;align-items:flex-start;}
+  .crop-sliders input[type=range]{width:140px;}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:30;}
+  .modal .modal-content{background:#fff;border-radius:14px;padding:16px;box-shadow:0 6px 30px rgba(0,0,0,.16);width:min(640px,90vw);}
+  .modal-title{font-weight:800;margin-bottom:8px;}
+  .modal.show{display:flex;}
+  .upload-item{cursor:pointer;}
   `;
   document.head.appendChild(style);
 }
@@ -1215,6 +1604,9 @@ export function mountUI() {
   injectSkeleton();
   bind();
   render();
+  fetchUploadConfig();
+  void renderCropPreview("poster");
+  void renderCropPreview("season");
   log("UI 已加载。");
 }
 
